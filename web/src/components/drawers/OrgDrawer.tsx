@@ -45,12 +45,12 @@ export function CheckInbox({ party }: { party: PartyName }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
       <Button variant="secondary" onClick={() => scan.mutate()} disabled={scan.isPending}>
-        {scan.isPending ? t("재료 기록 확인 중…") : t("받은 재료 확인")}
+        {scan.isPending ? t("새 재료 기록 확인 중…") : t("새 재료 기록 확인")}
       </Button>
-      <p className="w-full text-xs leading-relaxed text-ink-400">{t("우리 회사에 전달된 재료 기록을 불러옵니다. 실제 물건의 입고를 확인하는 기능은 아닙니다.")}</p>
+      <p className="w-full text-xs leading-relaxed text-ink-400">{t("우리 회사로 온 재료 기록을 확인하고 새 기록을 등록합니다. 실제 물건의 입고를 확인하는 기능은 아닙니다.")}</p>
       {scan.data && (
         <span role="status" className={cx('text-[13px]', scan.data.found ? 'text-accent' : 'text-ink-400')}>
-          {scan.data.found ? t("Imported {count} new material records", { count: scan.data.found }) : t("새로 받은 재료 기록이 없습니다")}
+          {scan.data.found ? t("Imported {count} new material records", { count: scan.data.found }) : t("등록할 새 재료 기록이 없습니다")}
         </span>
       )}
       {scan.error && <span className="text-[13px] text-red">{scan.error.message}</span>}
@@ -223,7 +223,7 @@ export function OrgDrawer({ id, onClose }: { id: PartyName; onClose: () => void 
           )
         ) : (
           <>
-            {keyed ? <CheckInbox party={id} /> : <Button variant="secondary" disabled>{t("받은 재료 확인")}</Button>}
+            {keyed ? <CheckInbox party={id} /> : <Button variant="secondary" disabled>{t("새 재료 기록 확인")}</Button>}
             <Reason>{!keyed ? t("Register the receiving key first") : null}</Reason>
           </>
         )}

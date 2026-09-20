@@ -28,10 +28,30 @@ export type JobStage =
   | "queued"
   | "preparing"
   | "proving"
+  | "awaiting_wallet"
   | "submitting"
   | "confirmed"
   | "rejected"
   | "failed";
+
+/**
+ * Parked on a job while its `balanceTx` call is delegated to a connected
+ * browser wallet (agent/API.md "Delegated wallet" addendum) — the browser
+ * polls `GET /jobs/:id`, sees this, calls the DApp Connector's
+ * `balanceUnsealedTransaction(txHex)` with it, and posts the result back to
+ * `POST /jobs/:id/wallet-result`. `kind` is always `"balance-and-submit"`
+ * today (the agent submits the balanced tx itself through its own node
+ * connection — see delegatedWallet.ts's doc comment for why) but is a
+ * literal union, not a bare string, so a future second kind (the browser
+ * submitting too) is a type-checked addition, not a silent string match.
+ */
+export type WalletRequest = {
+  readonly id: string;
+  readonly kind: "balance-and-submit";
+  /** The proven-but-unbalanced transaction, `Transaction<SignatureEnabled, Proof, PreBinding>`, hex-serialized. */
+  readonly txHex: string;
+  readonly networkId: string;
+};
 
 export type Job = {
   id: string;
@@ -45,6 +65,31 @@ export type Job = {
   blockHeight?: number;
   result?: Record<string, unknown>;
   error?: string;
+  /** Present only while `stage === "awaiting_wallet"`. */
+  walletRequest?: WalletRequest;
+};
+
+// ---------------------------------------------------------------------------
+// Delegated wallet (v1.4 addendum) — see agent/API.md and docs/WALLET.md.
+// ---------------------------------------------------------------------------
+
+/**
+ * A browser wallet connected on behalf of `party` (in-memory only — lost on
+ * restart, same as everything else `appState` holds). `coinPublicKey` /
+ * `encryptionPublicKey` are hex (the browser's connector returns them
+ * Bech32m-encoded via `getShieldedAddresses()`; the agent decodes them at
+ * session-creation time — see delegatedWallet.ts — so this shape matches
+ * what `WalletProvider.getCoinPublicKey`/`getEncryptionPublicKey` need
+ * verbatim, and so the browser never needs `@midnight-ntwrk/ledger-v8` or
+ * `wallet-sdk-address-format` in its bundle just to connect a wallet).
+ */
+export type WalletSession = {
+  readonly party: PartyName;
+  readonly networkId: string;
+  readonly coinPublicKey: string;
+  readonly encryptionPublicKey: string;
+  readonly unshieldedAddress: string;
+  readonly connectedAt: string;
 };
 
 export type CredentialStatus = "ACTIVE" | "CONSUMED";

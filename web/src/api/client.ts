@@ -20,7 +20,12 @@ import type {
   ScanResult,
   TransferInput,
   VerifyResult,
+  WalletSession,
+  WalletSessionInput,
 } from './types';
+
+/** Body for `POST /jobs/:id/wallet-result` — see agent/API.md's "Delegated wallet" addendum. */
+export type WalletResultInput = { requestId: string } & ({ balancedTxHex: string } | { error: string });
 
 /** Everything the UI calls. One implementation talks HTTP to the party agent, the other is an in-browser mock. */
 export interface VeilanceApi {
@@ -58,6 +63,13 @@ export interface VeilanceApi {
   explorerTx(hash: string): Promise<ExplorerTx>;
   explorerContract(): Promise<ExplorerContract>;
   explorerLedgerRaw(): Promise<LedgerRaw>;
+
+  /* ---------- v1.4 addendum: delegated wallet ---------- */
+  walletSessions(): Promise<WalletSession[]>;
+  connectWallet(input: WalletSessionInput): Promise<WalletSession>;
+  disconnectWallet(party: PartyName): Promise<void>;
+  /** Reports the browser wallet's `balanceUnsealedTransaction` result (or an error) for a job parked in `awaiting_wallet`. */
+  postWalletResult(jobId: string, input: WalletResultInput): Promise<void>;
 }
 
 let instance: VeilanceApi | null = null;

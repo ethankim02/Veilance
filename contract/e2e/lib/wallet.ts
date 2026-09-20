@@ -32,6 +32,7 @@ import { DustWallet } from "@midnight-ntwrk/wallet-sdk-dust-wallet";
 import { HDWallet, Roles } from "@midnight-ntwrk/wallet-sdk-hd";
 import { InMemoryTransactionHistoryStorage } from "@midnight-ntwrk/wallet-sdk-abstractions";
 import type { WalletProvider, MidnightProvider } from "@midnight-ntwrk/midnight-js-types";
+import { makeDefaultSubmissionService } from "@midnight-ntwrk/wallet-sdk-capabilities/submission";
 import {
   INDEXER_HTTP_URL,
   INDEXER_WS_URL,
@@ -108,6 +109,15 @@ export const persistWallet = async (wallet: Wallet, stateDir: string): Promise<v
   ]);
   for (const [kind, data] of [["shielded", sh], ["unshielded", un], ["dust", du]] as const) {
     const f = stateFile(stateDir, wallet.label, kind);
+    // Keep an hourly previous copy. A checkpoint can turn out unrestorable (seen
+    // once: the dust wallet refused to resume with "received an event with a
+    // timestamp prior to the time already synced to"), and a full dust re-sync on
+    // a public network costs hours.
+    if (fs.existsSync(f)) {
+      const prev = `${f}.prev`;
+      const stale = !fs.existsSync(prev) || Date.now() - fs.statSync(prev).mtimeMs > 3_600_000;
+      if (stale) fs.copyFileSync(f, prev);
+    }
     fs.writeFileSync(`${f}.tmp`, data);
     fs.renameSync(`${f}.tmp`, f);
   }
@@ -122,8 +132,12 @@ export const buildWallet = async (label: string, seedHex: string, options: Build
     unshielded: readState(options.stateDir, label, "unshielded"),
     dust: readState(options.stateDir, label, "dust"),
   };
-  const restoring = Boolean(saved.shielded && saved.unshielded && saved.dust);
-  if (options.stateDir) console.log(`  wallet ${label}: ${restoring ? "restoring persisted state" : "fresh sync"}`);
+  // Each sub-wallet restores independently, so losing one checkpoint (usually the
+  // slow dust one) does not force the other two to start over.
+  if (options.stateDir) {
+    const how = (k: keyof typeof saved) => `${k} ${saved[k] ? "restored" : "fresh"}`;
+    console.log(`  wallet ${label}: ${how("shielded")}, ${how("unshielded")}, ${how("dust")}`);
+  }
 
   const shieldedSecretKeys = ledger.ZswapSecretKeys.fromSeed(keys[Roles.Zswap]);
   const dustSecretKey = ledger.DustSecretKey.fromSeed(keys[Roles.Dust]);
@@ -148,12 +162,12 @@ export const buildWallet = async (label: string, seedHex: string, options: Build
   const facade = await WalletFacade.init({
     configuration,
     shielded: (config) =>
-      restoring ? ShieldedWallet(config).restore(saved.shielded as string) : ShieldedWallet(config).startWithSecretKeys(shieldedSecretKeys),
+      saved.shielded ? ShieldedWallet(config).restore(saved.shielded) : ShieldedWallet(config).startWithSecretKeys(shieldedSecretKeys),
     unshielded: (config) =>
-      restoring ? UnshieldedWallet(config).restore(saved.unshielded as string) : UnshieldedWallet(config).startWithPublicKey(PublicKey.fromKeyStore(keystore)),
+      saved.unshielded ? UnshieldedWallet(config).restore(saved.unshielded) : UnshieldedWallet(config).startWithPublicKey(PublicKey.fromKeyStore(keystore)),
     dust: (config) =>
-      restoring
-        ? DustWallet(config).restore(saved.dust as string)
+      saved.dust
+        ? DustWallet(config).restore(saved.dust)
         : DustWallet(config).startWithSecretKey(dustSecretKey, ledger.LedgerParameters.initialParameters().dust),
   });
 
@@ -323,6 +337,36 @@ const signTransactionIntents = (
 };
 
 /**
+ * Balances, signs and binds a proven-but-unbalanced transaction using
+ * `wallet`, returning the finalized transaction ready for submission —
+ * WITHOUT submitting it. Extracted out of {@link asMidnightJsProvider}'s
+ * `balanceTx` so the agent's delegated-wallet dev path (see
+ * `agent/src/delegatedWallet.ts`'s `POST /wallet/dev-balance-submit`) can
+ * reuse the exact same balancing logic — including the `signTransactionIntents`
+ * SDK workaround below — to stand in for a real browser wallet's
+ * `balanceUnsealedTransaction` without duplicating it.
+ */
+export const balanceUnboundTransaction = async (
+  wallet: Wallet,
+  tx: ledger.Transaction<ledger.SignatureEnabled, ledger.Proof, ledger.PreBinding>,
+  ttl?: Date,
+): Promise<ledger.FinalizedTransaction> => {
+  const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
+  const recipe = await wallet.facade.balanceUnboundTransaction(
+    tx,
+    { shieldedSecretKeys: wallet.shieldedSecretKeys, dustSecretKey: wallet.dustSecretKey },
+    { ttl: ttl ?? defaultTtl() },
+  );
+
+  signTransactionIntents(recipe.baseTransaction, signFn, "proof");
+  if (recipe.balancingTransaction) {
+    signTransactionIntents(recipe.balancingTransaction, signFn, "pre-proof");
+  }
+
+  return wallet.facade.finalizeRecipe(recipe);
+};
+
+/**
  * Adapts a {@link Wallet} to the `WalletProvider & MidnightProvider` pair
  * `@midnight-ntwrk/midnight-js-contracts` needs to balance and submit
  * contract-call transactions it built and had proven.
@@ -333,25 +377,40 @@ export const asMidnightJsProvider = async (
   const state = await wallet.facade.waitForSyncedState();
   const coinPublicKey = state.shielded.coinPublicKey.toHexString();
   const encryptionPublicKey = state.shielded.encryptionPublicKey.toHexString();
-  const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
 
   return {
     getCoinPublicKey: () => coinPublicKey,
     getEncryptionPublicKey: () => encryptionPublicKey,
-    balanceTx: async (tx, ttl) => {
-      const recipe = await wallet.facade.balanceUnboundTransaction(
-        tx,
-        { shieldedSecretKeys: wallet.shieldedSecretKeys, dustSecretKey: wallet.dustSecretKey },
-        { ttl: ttl ?? defaultTtl() },
-      );
-
-      signTransactionIntents(recipe.baseTransaction, signFn, "proof");
-      if (recipe.balancingTransaction) {
-        signTransactionIntents(recipe.balancingTransaction, signFn, "pre-proof");
-      }
-
-      return wallet.facade.finalizeRecipe(recipe);
-    },
+    balanceTx: (tx, ttl) => balanceUnboundTransaction(wallet, tx, ttl),
     submitTx: (tx) => wallet.facade.submitTransaction(tx),
+  };
+};
+
+
+/**
+ * The provider pair for a process that owns NO wallet (VEILANCE_AGENT_WALLET=0).
+ * Keys and fee balancing must come from a connected browser wallet — asking this
+ * provider for them is a hard, explicit error rather than a silent fallback.
+ * Submission needs no wallet at all: it is a relay of already balanced, signed
+ * and bound bytes to the node, done with the wallet SDK's standalone submission
+ * service (the same one WalletFacade uses internally).
+ */
+export const makeWalletlessProvider = (label: string): WalletProvider & MidnightProvider => {
+  const need = (what: string): never => {
+    throw new Error(`no wallet connected for "${label}": ${what} must come from a connected browser wallet (this agent runs with VEILANCE_AGENT_WALLET=0)`);
+  };
+  const submission = makeDefaultSubmissionService<ledger.FinalizedTransaction>({
+    relayURL: new URL(NODE_URL.replace(/^http/, "ws")),
+  });
+  return {
+    getCoinPublicKey: () => need("the coin public key"),
+    getEncryptionPublicKey: () => need("the encryption public key"),
+    balanceTx: async () => need("fee balancing and signing"),
+    submitTx: async (tx) => {
+      await submission.submitTransaction(tx, "Finalized");
+      const id = tx.identifiers().at(-1);
+      if (!id) throw new Error("submitted transaction has no identifier");
+      return id;
+    },
   };
 };

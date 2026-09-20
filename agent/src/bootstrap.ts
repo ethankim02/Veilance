@@ -17,7 +17,9 @@ import { generateEncKeypair } from "../../contract/src/sealed-entry.js";
 import { checkDevnetHealth, formatHealthReport } from "../../contract/e2e/lib/health.js";
 import { checkZkBuild } from "../../contract/e2e/lib/zk.js";
 import { buildWallet, ensureDust, fundFromGenesis, waitForSync } from "../../contract/e2e/lib/wallet.js";
-import { buildProviders } from "../../contract/e2e/lib/providers.js";
+import { buildProviders, type VeilanceProviders } from "../../contract/e2e/lib/providers.js";
+import { createDelegatedWalletProvider } from "./delegatedWallet.js";
+import type { MidnightProvider, WalletProvider } from "@midnight-ntwrk/midnight-js-types";
 
 import {
   AGENT_STATE_DIR,
@@ -26,6 +28,7 @@ import {
   FUNDER_SEED,
   HOSTED_PARTIES,
   SHARED_FEE_WALLET,
+  AGENT_WALLET,
   NETWORK_ID,
   WALLET_SEEDS,
   type PartyName,
@@ -78,9 +81,14 @@ export const bootstrap = async (): Promise<void> => {
     // and five sequential syncs would multiply that wait. Wallet state is
     // persisted under AGENT_STATE_DIR/wallets so later boots restore instantly.
     const walletStateDir = path.join(AGENT_STATE_DIR, "wallets");
-    const funder = FUNDER_SEED ? await buildWallet("funder", FUNDER_SEED, { stateDir: walletStateDir }) : null;
-    const wallets: Record<PartyName, Awaited<ReturnType<typeof buildWallet>>> = {} as never;
-    if (SHARED_FEE_WALLET) {
+    const funder = AGENT_WALLET && FUNDER_SEED ? await buildWallet("funder", FUNDER_SEED, { stateDir: walletStateDir }) : null;
+    const wallets: Record<PartyName, Awaited<ReturnType<typeof buildWallet>> | null> = {} as never;
+    if (!AGENT_WALLET) {
+      // Wallet-less mode: nothing to build, sync, fund or register. Fees are
+      // balanced + signed by a browser wallet connected per party.
+      appState.boot.step = "wallet-less mode (fees paid by a connected browser wallet)";
+      for (const name of HOSTED_PARTIES) wallets[name] = null;
+    } else if (SHARED_FEE_WALLET) {
       // One fee-paying wallet for every party (see config.ts SHARED_FEE_WALLET).
       if (!funder) throw new Error("VEILANCE_SHARED_FEE_WALLET=1 requires VEILANCE_FUNDER_SEED");
       appState.boot.step = "syncing the shared fee wallet (a first sync on a public network takes a long time)";
@@ -98,9 +106,9 @@ export const bootstrap = async (): Promise<void> => {
       appState.boot.step = "funding wallets (if needed)";
       const needsFunding = [];
       for (const name of HOSTED_PARTIES) {
-        const s = await waitForSync(wallets[name]);
+        const s = await waitForSync(wallets[name]!);
         const night = s.unshielded.balances[ledger.unshieldedToken().raw] ?? 0n;
-        if (night < FUNDING_AMOUNT / 2n) needsFunding.push(wallets[name]);
+        if (night < FUNDING_AMOUNT / 2n) needsFunding.push(wallets[name]!);
         else console.log(`  ${name}: already holds ${night} NIGHT, skipping funding`);
       }
       if (needsFunding.length > 0) {
@@ -113,15 +121,33 @@ export const bootstrap = async (): Promise<void> => {
       }
 
       appState.boot.step = "ensuring DUST";
-      for (const name of HOSTED_PARTIES) await ensureDust(wallets[name]);
+      for (const name of HOSTED_PARTIES) await ensureDust(wallets[name]!);
     }
 
     appState.boot.step = "building providers and private state";
     for (const name of HOSTED_PARTIES) {
-      const providers = await buildProviders(name, wallets[name], {
+      const builtProviders = await buildProviders(name, wallets[name], {
         baseStateDir: AGENT_STATE_DIR,
         accountId: `agent-${name}`,
       });
+      // Delegated wallet (v1.4 addendum, agent/API.md): wrap this party's
+      // agent-owned WalletProvider & MidnightProvider so a browser wallet
+      // connected via POST /wallet/session (delegatedWallet.ts's session
+      // map) transparently takes over balancing — falling straight back to
+      // the pair `buildProviders` just returned whenever no session is
+      // active. `walletProvider`/`midnightProvider` are readonly on
+      // `MidnightProviders`, and `builtProviders.walletProvider ===
+      // builtProviders.midnightProvider` (both are the same object from
+      // `asMidnightJsProvider` — see providers.ts), so this rebuilds the
+      // providers object with both replaced by the same new wrapper rather
+      // than mutating either field in place.
+      // `VeilanceProviders`'s type only narrows this to `WalletProvider`, but
+      // providers.ts constructs `walletProvider`/`midnightProvider` from the
+      // very same `asMidnightJsProvider(wallet)` object, so it already
+      // implements `submitTx` too — this assertion just recovers that fact.
+      const fallback = builtProviders.walletProvider as WalletProvider & MidnightProvider;
+      const delegated = createDelegatedWalletProvider(name, fallback);
+      const providers: VeilanceProviders = { ...builtProviders, walletProvider: delegated, midnightProvider: delegated };
 
       const file = loadOrCreatePartyFile(name, name === "admin" ? ZERO_HEX_32 : defaultCertId(name));
       if (!file.encPk || !file.encSk) {
@@ -151,7 +177,7 @@ export const bootstrap = async (): Promise<void> => {
       appState.parties.set(name, appParty);
       for (const job of file.jobs) appState.registerJob(job);
     }
-    console.log("All party wallets funded, DUST-registered, and providers built.");
+    console.log(AGENT_WALLET ? "All party wallets funded, DUST-registered, and providers built." : "Wallet-less mode: providers built, no agent wallet.");
 
     appState.boot.step = "reconnecting to deployed contract (if any)";
     // A single-company agent (HOSTED_PARTIES excludes "admin") never calls

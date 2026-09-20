@@ -10,7 +10,7 @@
 import { randomUUID } from "node:crypto";
 import { appState } from "./appState.js";
 import { upsertJob } from "./state.js";
-import type { Job, JobCircuit, JobStage, PartyName } from "./types.js";
+import type { Job, JobCircuit, JobStage, PartyName, WalletRequest } from "./types.js";
 
 const FAILED_ASSERT_MARKER = "failed assert: ";
 
@@ -68,6 +68,35 @@ const setStage = (job: Job, stage: JobStage): void => {
   job.stage = stage;
   persistJob(job);
 };
+
+/**
+ * Parks `job` in `awaiting_wallet` with `request` attached — called by
+ * delegatedWallet.ts's `balanceTx` right before it starts waiting on the
+ * browser. The job stays queued-out (this process's drain loop is blocked
+ * `await`ing the same promise the browser will resolve), so `currentJob`
+ * above still correctly reports it as the active job.
+ */
+export const beginAwaitingWallet = (job: Job, request: WalletRequest): void => {
+  job.walletRequest = request;
+  setStage(job, "awaiting_wallet");
+};
+
+/**
+ * Clears `walletRequest` once the browser has responded (or the request
+ * timed out) — called from both the success and failure paths of
+ * delegatedWallet.ts's `balanceTx`, so a finished job never keeps showing a
+ * stale `walletRequest` the web UI would otherwise try to act on again.
+ * Does not change `stage`: the caller sets that separately (success moves on
+ * to `submitting`; failure lets the thrown error reach `drain()`'s own
+ * catch, which sets `failed` via `finish()`).
+ */
+export const clearJobWalletRequest = (job: Job): void => {
+  job.walletRequest = undefined;
+  persistJob(job);
+};
+
+/** Moves `job` to `submitting` — called once a delegated `balanceTx` has a finalized transaction in hand, mirroring the stage the agent's own wallet path implicitly passes through before `midnightProvider.submitTx`. */
+export const setSubmitting = (job: Job): void => setStage(job, "submitting");
 
 const finish = (job: Job, patch: Partial<Job>): void => {
   Object.assign(job, patch);

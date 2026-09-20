@@ -24,7 +24,7 @@ import {
   ZK_CONFIG_DIR,
   type PartyName,
 } from "./config.js";
-import { asMidnightJsProvider, type Wallet } from "./wallet.js";
+import { asMidnightJsProvider, makeWalletlessProvider, type Wallet } from "./wallet.js";
 
 export const VEILANCE_PRIVATE_STATE_ID = "veilancePrivateState" as const;
 export type VeilancePrivateStateId = typeof VEILANCE_PRIVATE_STATE_ID;
@@ -75,7 +75,7 @@ export type BuildProvidersOptions = {
 
 export const buildProviders = async (
   party: PartyName,
-  wallet: Wallet,
+  wallet: Wallet | null,
   options: BuildProvidersOptions = {},
 ): Promise<VeilanceProviders> => {
   const baseStateDir = options.baseStateDir ?? STATE_DIR;
@@ -102,7 +102,7 @@ export const buildProviders = async (
     },
   );
 
-  const walletAndMidnightProvider = await asMidnightJsProvider(wallet);
+  const walletAndMidnightProvider = wallet ? await asMidnightJsProvider(wallet) : makeWalletlessProvider(party);
 
   return {
     privateStateProvider,

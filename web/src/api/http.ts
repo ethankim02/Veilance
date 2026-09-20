@@ -1,5 +1,5 @@
-import type { VeilanceApi } from './client';
-import { ApiError, type Challenge, type PartyName } from './types';
+import type { VeilanceApi, WalletResultInput } from './client';
+import { ApiError, type Challenge, type PartyName, type WalletSessionInput } from './types';
 
 export function createHttpApi(baseUrl: string): VeilanceApi {
   const base = baseUrl.replace(/\/$/, '');
@@ -66,5 +66,9 @@ export function createHttpApi(baseUrl: string): VeilanceApi {
     explorerTx: (hash) => req(`/explorer/tx/${encodeURIComponent(hash)}`),
     explorerContract: () => req('/explorer/contract'),
     explorerLedgerRaw: () => req('/explorer/ledger-raw'),
+    walletSessions: () => req('/wallet/session'),
+    connectWallet: (input: WalletSessionInput) => post('/wallet/session', input),
+    disconnectWallet: (party) => req(`/wallet/session/${party}`, { method: 'DELETE' }).then(() => undefined),
+    postWalletResult: (jobId, input: WalletResultInput) => post(`/jobs/${encodeURIComponent(jobId)}/wallet-result`, input).then(() => undefined),
   };
 }

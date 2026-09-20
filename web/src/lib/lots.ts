@@ -15,7 +15,7 @@ export const materialName = (lot: GraphEdge) => {
   const m = lot.materialLabel?.trim();
   return t(m ? m.charAt(0).toUpperCase() + m.slice(1) : 'Lot');
 };
-export const lotTitle = (edges: GraphEdge[], lot: GraphEdge) => `${materialName(lot)} · ${t('Lot')} ${lotNumber(edges, lot.id)}`;
+export const lotTitle = (edges: GraphEdge[], lot: GraphEdge) => `${materialName(lot)} · ${t('Material record #{number}', { number: lotNumber(edges, lot.id) })}`;
 
 export const STATUS_WORD: Record<EdgeStatus, string> = { ISSUED: 'Awaiting receipt', DELIVERED: 'Held', CONSUMED: 'Used in transfer' };
 

@@ -11,10 +11,18 @@ import { UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { pureCircuits } from "../../contract/src/managed/veilance/contract/index.js";
 
 import { appState } from "./appState.js";
-import { CORS_ORIGINS, NETWORK_ID } from "./config.js";
+import { AGENT_WALLET, CORS_ORIGINS, DEV_WALLET_ENABLED, NETWORK_ID } from "./config.js";
 import { fromHex, toHex } from "./bytes.js";
 import { getJob, listJobs } from "./jobs.js";
 import { registry } from "./registry.js";
+import {
+  createWalletSession,
+  devBalanceSubmit,
+  devIdentity,
+  listSessions,
+  removeWalletSession,
+  submitWalletResult,
+} from "./walletHandlers.js";
 import { currentLedger } from "../../contract/e2e/lib/party.js";
 import { getLedgerSummary, getPolicySummary, getRecentTxs } from "./ledgerRead.js";
 import { isPartyName, isVerifierProfileName, type PartyName, type VerifierProfileName } from "./types.js";
@@ -68,6 +76,12 @@ app.get("/health", async (c) => {
     },
     contractAddress: appState.contractAddress,
     deployed: appState.contractAddress !== undefined,
+    // false = this process owns no wallet; every job needs a connected browser wallet.
+    agentWallet: AGENT_WALLET,
+    // v1.4 addendum: the web UI needs this to hint the right network to
+    // `window.midnight[<wallet>].connect(networkId)` and to refuse a
+    // connection on the wrong network before ever calling POST /wallet/session.
+    networkId: NETWORK_ID,
   });
 });
 
@@ -95,12 +109,18 @@ app.get("/parties", async (c) => {
         certified = ledger.certifiedSuppliers.findPathForLeaf(certLeaf) !== undefined;
       }
     }
-    const state = await waitForSync(appParty.party.wallet);
-    const night = (state.unshielded.balances[ledgerV8.unshieldedToken().raw] ?? 0n).toString();
-    const dust = state.dust.balance(new Date()).toString();
-    // The unshielded address is what a faucet or another wallet sends NIGHT to.
-    const addr = await appParty.party.wallet.facade.unshielded.getAddress();
-    const unshieldedAddress = UnshieldedAddress.codec.encode(NETWORK_ID as never, addr).asString();
+    // Wallet-less mode has no agent wallet: balances/address are the browser wallet's business.
+    let night: string | null = null;
+    let dust: string | null = null;
+    let unshieldedAddress: string | null = null;
+    const w = appParty.party.wallet;
+    if (w) {
+      const state = await waitForSync(w);
+      night = (state.unshielded.balances[ledgerV8.unshieldedToken().raw] ?? 0n).toString();
+      dust = state.dust.balance(new Date()).toString();
+      const addr = await w.facade.unshielded.getAddress();
+      unshieldedAddress = UnshieldedAddress.codec.encode(NETWORK_ID as never, addr).asString();
+    }
     result.push({
       name,
       partyId: toHex(partyId),
@@ -352,6 +372,47 @@ app.get("/explorer/ledger-raw", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Delegated wallet (v1.4 addendum) — see agent/API.md and docs/WALLET.md.
+// ---------------------------------------------------------------------------
+
+app.post("/wallet/session", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const result = createWalletSession(body);
+  if (!result.ok) {
+    const status = result.error.code === "network_mismatch" || result.error.code === "unknown_party" ? 409 : 400;
+    return c.json(error(result.error.message, result.error.code), status);
+  }
+  return c.json(result.session, 200);
+});
+
+app.get("/wallet/session", (c) => c.json(listSessions()));
+
+app.delete("/wallet/session/:party", (c) => {
+  const party = c.req.param("party");
+  const removed = removeWalletSession(party);
+  if (!removed) return c.json(error(`no wallet session for party "${party}"`, "not_found"), 404);
+  return c.json({ ok: true });
+});
+
+if (DEV_WALLET_ENABLED) {
+  // Dev-only, gated by VEILANCE_DEV_WALLET=1 — see config.ts's doc comment
+  // and web/src/lib/devWallet.ts.
+  app.post("/wallet/dev-balance-submit", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const result = await devBalanceSubmit(body);
+    if (!result.ok) return c.json(error(result.error.message, result.error.code), 400);
+    return c.json({ tx: result.tx });
+  });
+
+  app.get("/wallet/dev-identity/:party", async (c) => {
+    const result = await devIdentity(c.req.param("party"));
+    if (!result.ok) return c.json(error(result.error.message, result.error.code), 400);
+    const { ok: _ok, ...rest } = result;
+    return c.json(rest);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Jobs
 // ---------------------------------------------------------------------------
 
@@ -365,6 +426,15 @@ app.get("/jobs", (c) => {
   const partyRaw = c.req.query("party");
   const party = partyRaw && isPartyName(partyRaw) ? partyRaw : undefined;
   return c.json(listJobs(party));
+});
+
+app.post("/jobs/:id/wallet-result", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  const outcome = submitWalletResult(id, body);
+  if (outcome.status === "not_found") return c.json(error(outcome.message, "not_found"), 404);
+  if (outcome.status === "bad_request") return c.json(error(outcome.message, "bad_request"), 400);
+  return c.json({ ok: true });
 });
 
 app.onError((err, c) => {

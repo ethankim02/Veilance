@@ -15,7 +15,16 @@ export type Circuit =
   | 'attestProcurement'
   | 'attestRegulator';
 
-export type JobStage = 'queued' | 'preparing' | 'proving' | 'submitting' | 'confirmed' | 'rejected' | 'failed';
+export type JobStage = 'queued' | 'preparing' | 'proving' | 'awaiting_wallet' | 'submitting' | 'confirmed' | 'rejected' | 'failed';
+
+/** Parked on a job while `balanceTx` is delegated to a connected browser wallet (agent/API.md "Delegated wallet" v1.4 addendum). */
+export interface WalletRequest {
+  id: string;
+  kind: 'balance-and-submit';
+  /** The proven-but-unbalanced transaction, hex-serialized — pass straight to the connector's `balanceUnsealedTransaction`. */
+  txHex: string;
+  networkId: string;
+}
 
 export interface Job {
   id: string;
@@ -29,6 +38,8 @@ export interface Job {
   blockHeight?: number;
   result?: Record<string, unknown>;
   error?: string;
+  /** Present only while `stage === 'awaiting_wallet'`. */
+  walletRequest?: WalletRequest;
 }
 
 export interface Health {
@@ -39,6 +50,29 @@ export interface Health {
   devnet: { node: boolean; indexer: boolean; proofServer: { ok: boolean; version?: string } };
   contractAddress?: string;
   deployed: boolean;
+  /** v1.4 addendum: what network id to hint to `window.midnight[<wallet>].connect(...)`, and to check the wallet against before trusting it. */
+  networkId?: string;
+}
+
+/* ---------- v1.4 addendum: delegated wallet ---------- */
+
+/** A browser wallet connected on behalf of `party` (agent-side, in-memory only). */
+export interface WalletSession {
+  party: PartyName;
+  networkId: string;
+  coinPublicKey: string;
+  encryptionPublicKey: string;
+  unshieldedAddress: string;
+  connectedAt: string;
+}
+
+/** Body for `POST /wallet/session` — see agent/src/walletHandlers.ts's doc comment: the three key fields are the connector's native Bech32m strings, not hex, despite the plain names. */
+export interface WalletSessionInput {
+  party: PartyName;
+  networkId: string;
+  coinPublicKey: string;
+  encryptionPublicKey: string;
+  unshieldedAddress: string;
 }
 
 export interface Party {

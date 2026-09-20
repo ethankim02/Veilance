@@ -5,7 +5,39 @@ import type { Job } from '@/api/types';
 import { useJob } from '@/hooks/queries';
 import { cx, reason } from '@/lib/format';
 import { STAGE_WORD, elapsedMs, expectedMs, isActive } from '@/lib/progress';
+import { balanceViaConnectedWallet, getDelegatedParty } from '@/lib/wallet';
 import { Explore } from './ui';
+
+/**
+ * Delegated wallet (agent/API.md v1.4 addendum): while `job` is
+ * `awaiting_wallet` and this browser's connected wallet is delegated for
+ * `job.party`, calls the connector's `balanceUnsealedTransaction` and posts
+ * the result back to `POST /jobs/:id/wallet-result`. A ref guards against
+ * calling it twice for the same `walletRequest.id` (JobRing polls the job
+ * every second while active — see useJob — so without the guard a slow
+ * connector call could overlap with the next poll's effect run).
+ */
+function useDelegatedWalletHandoff(job: Job | undefined) {
+  const handled = useRef<string | null>(null);
+  useEffect(() => {
+    const request = job?.walletRequest;
+    if (!job || job.stage !== 'awaiting_wallet' || !request) return;
+    if (getDelegatedParty() !== job.party) return; // not our wallet's job to approve
+    if (handled.current === request.id) return;
+    handled.current = request.id;
+    void (async () => {
+      try {
+        const balancedTxHex = await balanceViaConnectedWallet(request.txHex);
+        await getApi().postWalletResult(job.id, { requestId: request.id, balancedTxHex });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'wallet rejected the request';
+        await getApi()
+          .postWalletResult(job.id, { requestId: request.id, error: message })
+          .catch(() => {});
+      }
+    })();
+  }, [job]);
+}
 
 export function Ring({ pct, over, seconds, size = 36 }: { pct: number; over: boolean; seconds: number; size?: number }) {
   useI18n();
@@ -39,6 +71,7 @@ export function JobRing({ jobId, initial, onTerminal }: { jobId: string; initial
   const q = useJob(jobId, initial);
   const job = q.data ?? initial;
   const active = isActive(job);
+  useDelegatedWalletHandoff(job);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!active) return;

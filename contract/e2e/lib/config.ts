@@ -95,6 +95,14 @@ export const GENESIS_WALLET_SEED = FUNDER_SEED;
  */
 export const SHARED_FEE_WALLET = env("VEILANCE_SHARED_FEE_WALLET", IS_LOCAL_DEVNET ? "0" : "1") === "1";
 
+/**
+ * "0" = the process owns NO wallet at all: nothing is synced, no seed is read,
+ * and every transaction's fees are balanced + signed by a browser wallet
+ * connected for that party (agent/docs WALLET.md). The process still proves
+ * locally and submits the finished transaction to the node. Default "1".
+ */
+export const AGENT_WALLET = env("VEILANCE_AGENT_WALLET", "1") === "1";
+
 export const FUNDING_AMOUNT = BigInt(env("VEILANCE_FUNDING_AMOUNT", IS_LOCAL_DEVNET ? "40000000000000" : "1000000000"));
 
 /** Private-state store password. Local e2e only — never a real secret. */

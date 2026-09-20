@@ -527,6 +527,7 @@ export function createMockApi(): VeilanceApi {
         devnet: { node: true, indexer: true, proofServer: { ok: true, version: 'mock' } },
         contractAddress: S.contractAddress,
         deployed: true,
+        networkId: 'mock',
       };
     },
     async parties() {
@@ -687,6 +688,24 @@ export function createMockApi(): VeilanceApi {
         certifiedOriginCount: S.origins.length,
         certifiedSupplierCount: S.suppliers.length,
       };
+    },
+    // ---------- v1.4 addendum: delegated wallet ----------
+    // The mock never proves anything for real, so it never has a proven-but-
+    // unbalanced transaction to hand a wallet — delegation is not simulated
+    // here. These exist only so `VeilanceApi` type-checks against one
+    // implementation for both modes; the dev-wallet round trip (docs/WALLET.md)
+    // is exercised against the real agent instead, not mock mode.
+    async walletSessions() {
+      return [];
+    },
+    async connectWallet() {
+      throw new ApiError('Wallet delegation is not simulated in mock mode', 'NOT_SUPPORTED', 501);
+    },
+    async disconnectWallet() {
+      /* no sessions ever exist in mock mode */
+    },
+    async postWalletResult() {
+      throw new ApiError('Wallet delegation is not simulated in mock mode', 'NOT_SUPPORTED', 501);
     },
   };
 }

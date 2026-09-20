@@ -23,7 +23,8 @@ import type { Wallet } from "./wallet.js";
 /** Everything one demo participant needs to act against the contract. */
 export type Party = {
   readonly name: PartyName;
-  readonly wallet: Wallet;
+  /** null when the process runs without its own wallet (VEILANCE_AGENT_WALLET=0). */
+  readonly wallet: Wallet | null;
   readonly providers: VeilanceProviders;
   readonly enc: EncKeypair;
   privateState: VeilancePrivateState;

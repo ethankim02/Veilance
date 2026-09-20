@@ -220,3 +220,85 @@ senders do not receive later consumption transaction links for a recipient's lot
 OEM receives no inventory edges. `viewer=admin` returns the full operations graph.
 This query parameter is not an authenticated identity or authorization boundary;
 the single-process demo's other routes remain unchanged and unauthenticated.
+
+## Delegated wallet (v1.4 addendum — browser wallet connection)
+
+Proving and every witness secret (`partySecret`, X25519 inbox keys, held
+credentials) stay in the agent, exactly as before. This addendum only moves
+**fee balancing and submission** for a job's circuit call to a browser
+wallet (Lace or any other `@midnight-ntwrk/dapp-connector-api` v4.0.1
+wallet), when one is connected for that job's party. See `docs/WALLET.md`
+for the verified DApp Connector facts this is built on, sources, and how to
+test it (with the dev wallet or with real Lace on Preprod).
+
+`Job.stage` gains `"awaiting_wallet"`, between `proving` and `submitting`.
+While in that stage, `Job` also carries:
+
+```
+walletRequest: {
+  id: string
+  kind: "balance-and-submit"
+  txHex: hex          // proven-but-unbalanced tx, Transaction<SignatureEnabled, Proof, PreBinding>, serialized
+  networkId: string
+}
+```
+
+The browser is expected to call the connected wallet's
+`balanceUnsealedTransaction(txHex)` with `walletRequest.txHex` and post the
+result back (see below). **The agent always submits the balanced
+transaction itself** through its own node connection — the DApp Connector's
+`submitTransaction` reports nothing back (not even a transaction id), so a
+browser-submitted tx could never fill in `Job.txHash`; see docs/WALLET.md's
+"verified facts" for the source. A job stuck in `awaiting_wallet` for more
+than 5 minutes fails with `error: "wallet did not respond"` — the same
+`stage: "failed"` shape as any other non-assert failure (contract rejections
+from an executed circuit call still happen exactly as before, and still
+before any wallet involvement — `awaiting_wallet` only happens after a
+successful local circuit execution has already produced a proof).
+
+- `POST /wallet/session` `{ party: PartyName, networkId: string, coinPublicKey: string, encryptionPublicKey: string, unshieldedAddress: string }`
+  → `200 WalletSession`. Marks `party` (must be one this process hosts —
+  `AGENT_PARTIES`) as wallet-delegated: every subsequent job for that party
+  has its `balanceTx` delegated to this wallet until disconnected. `409` on
+  `networkId` mismatch or an unhosted party. **The three key/address fields
+  are named to match the rest of this API's hex convention, but carry the
+  DApp Connector's native Bech32m encoding** (`getShieldedAddresses()`'s
+  `shieldedCoinPublicKey`/`shieldedEncryptionPublicKey`, and
+  `getUnshieldedAddress()`'s `unshieldedAddress`) — the agent decodes them
+  (it already depends on `wallet-sdk-address-format`); the browser never
+  needs to. In-memory only — lost on restart, like everything else in
+  `appState`.
+- `GET /wallet/session` → `WalletSession[]` — every party with a connected
+  wallet right now, `coinPublicKey`/`encryptionPublicKey` already decoded to
+  hex.
+- `DELETE /wallet/session/:party` → `{ ok: true }` (404 if none). Reverts
+  `party` to the agent's own wallet; any job already `awaiting_wallet` for
+  that party still waits for a result (or the 5-minute timeout) — it is not
+  cancelled.
+- `POST /jobs/:id/wallet-result` `{ requestId: string, balancedTxHex: hex } | { requestId: string, error: string }`
+  → `{ ok: true }`. `requestId` must match the job's current
+  `walletRequest.id` (404 otherwise — already resolved, timed out, or never
+  existed). `balancedTxHex` is the connector's `balanceUnsealedTransaction`
+  result, decoding to `Transaction<SignatureEnabled, Proof, Binding>`.
+  `error` (e.g. the user rejected the connector's prompt) fails the job with
+  that message, `stage: "failed"` (not `"rejected"` — that stage is reserved
+  for the contract's own assert failures). Posting `{ txHash }` instead is
+  `400` — this API does not support a browser that submits the transaction
+  itself (see above).
+
+### Dev wallet (`VEILANCE_DEV_WALLET=1`)
+
+Two additional endpoints, only registered when the agent is started with
+`VEILANCE_DEV_WALLET=1` — see docs/WALLET.md for how `web/src/lib/devWallet.ts`
+uses them to exercise the full round trip above without a real Lace install.
+Neither should ever be enabled against a real deployment's agent.
+
+- `POST /wallet/dev-balance-submit` `{ party: PartyName, txHex: hex }` →
+  `{ tx: hex }`. Balances (signs, binds) `txHex` using `party`'s own real
+  headless agent wallet — the exact function the agent's non-delegated path
+  also calls — and returns the result, WITHOUT submitting it or touching any
+  job. Stands in for a real wallet's `balanceUnsealedTransaction`.
+- `GET /wallet/dev-identity/:party` → `{ coinPublicKey, encryptionPublicKey, unshieldedAddress, networkId }`,
+  all Bech32m — `party`'s own headless wallet's identity, in the same shape
+  `POST /wallet/session` expects, so the dev wallet needs no separate
+  encoding of its own.

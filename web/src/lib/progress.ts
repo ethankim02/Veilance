@@ -2,7 +2,7 @@ import { t } from './i18n';
 import type { Circuit, Job, JobStage, PartyName } from '@/api/types';
 import { shortName } from './registry';
 
-const ACTIVE = new Set<JobStage>(['queued', 'preparing', 'proving', 'submitting']);
+const ACTIVE = new Set<JobStage>(['queued', 'preparing', 'proving', 'awaiting_wallet', 'submitting']);
 export const isActive = (j?: Job | null): boolean => !!j && ACTIVE.has(j.stage);
 
 /** How long a job is expected to take: ~40 s on the devnet, PROVE_MS + 1 s in the mock. */
@@ -16,6 +16,7 @@ export const STAGE_WORD: Record<JobStage, string> = {
   queued: 'Queued',
   preparing: 'Preparing',
   proving: 'Proving',
+  awaiting_wallet: 'Approve in wallet',
   submitting: 'Submitting',
   confirmed: 'Confirmed',
   rejected: 'Rejected',

@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:wallet && npm run test:shared",
+    "test:wallet": "tsx src/walletRequests.test.ts",
+    "test:shared": "tsx ../shared/graphScope.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
