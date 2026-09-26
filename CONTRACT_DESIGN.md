@@ -230,7 +230,7 @@ OEM 화면 (landing Step 3) 매핑:
 | Responsible sourcing ✓ | attest profile ≥ 1 (origin certified) |
 | Valid chain of custody ✓ | tree membership (issue 와 transfer 가 각각 검증한 결과의 누적) |
 | Restricted source ✗ | origin certified = allow-list 포함 |
-| Duplicate claim ✗ | transfer 의 nullifier 검사 (Regulator profile 이면 현재 credential 까지) |
+| Duplicate claim ✗ | 모든 attest profile 이 증명에 쓴 credential 을 소비하고 새 secret 으로 재발행 (rotate-on-attest, §9) |
 
 ---
 
@@ -336,8 +336,8 @@ contract/
 | S-1 | MEDIUM | commitment 의 hiding 은 전적으로 `batchSecret` 에 의존. 나머지 필드(ownerId, originId, carbonClass, materialType) 는 열거 가능한 값 공간 | 수용. **batchSecret 은 반드시 128bit 이상 CSPRNG**. DApp 레이어 책임. 대안: `persistentCommit` |
 | S-2 | HIGH | holder 가 transfer 시 carbonClass 를 낮춰 재발행 가능 → procurement predicate 무력화 | **수정** (D-8). 테스트로 회귀 방지 |
 | S-3 | HIGH | witness 를 두 번 호출하면 검사용 값과 커밋용 값이 다를 수 있음 | **수정**. 모든 witness 를 `const` 로 1회 바인딩. 테스트 "witness that changes its answer" 로 확인 |
-| S-4 | MEDIUM | `attestRegulator` 는 nullifier 를 공개 → 이후 transfer 와 nullifier↔nullifier 연결 | 수용 (§4.4 의 의도된 trade-off). commitment 와의 연결은 여전히 비공개 |
-| S-5 | MEDIUM | `attestConsumer` / `attestProcurement` 는 nullifier 를 검사하지 않아 이미 소비된 credential 도 통과 | 수용. 테스트 "KNOWN LIMITATION" 으로 문서화. 검사를 넣으면 S-4 의 linkage 가 모든 profile 로 확대됨 |
+| S-4 | MEDIUM | (이전) `attestRegulator` 가 소비하지 않는 credential 의 nullifier 를 공개 → 이후 transfer 와 연결 | **수정** (rotate-on-attest, §9). 공개된 nullifier 의 credential 은 같은 tx 에서 소멸하므로 다시 나타나지 않음 |
+| S-5 | MEDIUM | (이전) `attestConsumer` / `attestProcurement` 가 이미 소비된 credential 도 통과 | **수정** (rotate-on-attest, §9). 테스트 "every profile rejects a consumed credential" |
 | S-6 | LOW | `HistoricMerkleTree.checkRoot` 는 어느 root 로 증명했는지 공개 → 오래된 root 사용 시 생성 시점 유추 가능 | witness 구현이 항상 현재 tree 로 path 생성 |
 | S-7 | LOW | anonymity set = tree 의 leaf 수. 초기 참여자는 익명성 약함 | 구조적 한계 |
 | S-8 | LOW | admin rotation 불가 (`sealed`), revocation 불가, tree 용량 미검사 (256 / 256 / 65536) | 프로덕션 전 필요 |
@@ -444,3 +444,26 @@ Veilance negative cases
   ✓ a witness that changes its answer between calls cannot split check from commit
   ✓ a credential that was never issued cannot be transferred
 ```
+
+---
+
+## 9. Rotate-on-attest
+
+모든 attest circuit(`attestConsumer` / `attestProcurement` / `attestRegulator`)은 조건 검사 후 같은 tx 안에서
+
+1. 증명에 쓴 credential 의 nullifier 가 `nullifiers` 에 없는지 확인하고 추가해 **소비**한다.
+2. owner·origin·material·carbonClass 를 그대로 두고 새 `batchSecret` 으로 만든 commitment 를 `provenanceTree` 에 **재발행**한다. 필드는 회로가 고정하므로 재발행으로 credential 이 좋아질 수 없다.
+3. attestation 을 기록하고 `[nullifier, rotatedCommitment]` 를 반환한다.
+
+효과:
+
+| 성질 | 이전 | 이후 |
+|---|---|---|
+| 이미 전달한 credential 로 증명 | consumer/procurement 통과 (S-5) | 모든 profile 거부 |
+| 증명 ↔ 이후 transfer 연결 | regulator 증명의 nullifier 가 transfer 때 다시 공개되어 연결 (S-4) | 공개된 nullifier 의 credential 은 소멸. 이후 transfer 는 재발행된 credential 의 다른 nullifier 를 공개 → 연결 불가 |
+| 공개 항목 | attestation key (+ regulator 는 nullifier) | attestation key, nullifier, 재발행 commitment |
+
+비용: 증명마다 `provenanceTree` leaf 1개와 nullifier 1개가 늘어난다(트리 용량 65 536). 같은 credential 로 동시에 두 증명을 제출하면 하나는 거부된다(에이전트 job 큐는 순차). regulator profile 은 이제 procurement 와 같은 검사를 하고 기록되는 profile 코드만 다르다.
+
+에이전트: credential 의 `id` 는 처음 받은 commitment 로 고정하고, 현재 commitment·secret 과 회전 이력(`rotations`)을 vault 에 따로 둔다. 새 secret 은 tx 전에 `pendingBatchSecret` 으로 디스크에 먼저 기록하고, 다음 작업 때 그 commitment 가 체인에 있으면 채택한다(`settlePendingRotation`). 회로가 바뀌어 verifier key 가 달라지므로 컨트랙트 재배포가 필요하다.
+

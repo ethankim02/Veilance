@@ -234,8 +234,11 @@ with 9 and commit to 0. Every witness is now bound to a `const` before use
 asserts the witness is evaluated exactly once and that the committed class is the
 checked one.
 
-**S-4 — MEDIUM (accepted, spec-mandated). `attestRegulator` discloses the
-nullifier of a credential that is *not* being spent.**
+**S-4 — MEDIUM. FIXED by rotate-on-attest (CONTRACT_DESIGN.md §9): every
+attest circuit now SPENDS the credential whose nullifier it publishes and
+re-mints it under a fresh secret, so that nullifier never reappears and the
+attestation links to nothing later. Original finding, kept for history:
+`attestRegulator` discloses the nullifier of a credential that is *not* being spent.**
 `nullifiers` is a public `Set`, and `Set.member(v)` reveals `v`. Proving
 "not consumed" therefore necessarily publishes the nullifier. Consequence: a
 regulator attestation is **linkable to the later spend of the same credential** —
@@ -248,7 +251,9 @@ instead of a `Set`, or derive a per-verifier nullifier
 `H("nf-att", commitment, secret, challenge)` and keep a separate attestation
 nullifier set.
 
-**S-5 — MEDIUM (accepted, MVP limitation, documented by test).
+**S-5 — MEDIUM. FIXED by rotate-on-attest (CONTRACT_DESIGN.md §9); now
+covered by `"every profile rejects a consumed credential"` and
+`"an attestation rotates the credential..."`. Original finding, kept for history:
 `attestConsumer` and `attestProcurement` do not check the nullifier set.**
 Per the spec only the regulator profile checks consumption, so an already-spent
 credential still satisfies the consumer and procurement profiles. This is a real
@@ -472,8 +477,9 @@ added 53 packages
 - certified supplier cannot issue for an uncertified origin → `"origin is not certified"`
 - a party cannot spend a credential it does not own → `"does not own this credential"`
 - carbon class may not be reset downwards (S-2)
-- KNOWN LIMITATION: a consumed credential still passes the consumer profile,
-  while the regulator profile rejects it (S-5)
+- every profile rejects a consumed credential (S-5, fixed by rotate-on-attest)
+- an attestation rotates the credential: the old one is dead, the new one still
+  transfers, and the attestation and transfer nullifiers differ (S-4)
 - a flip-flopping witness cannot split check from commit (S-3)
 - a credential that was never issued cannot be transferred →
   `"not in the provenance tree"`

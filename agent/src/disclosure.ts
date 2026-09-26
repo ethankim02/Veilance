@@ -34,20 +34,19 @@ const TRANSFER: DisclosurePreview = {
   ],
 };
 
-const attest = (profile: VerifierProfileName): DisclosurePreview => ({
+const attest = (_profile: VerifierProfileName): DisclosurePreview => ({
   public: [
     "attestation key = H(\"veilance:att\", challenge, holderPartyId, profile) — opaque unless the challenge is known",
     "recomputed Merkle roots (already public ledger state)",
-    ...(profile === "regulator" ? ["nullifier of the attested credential (consumed-state check)"] : []),
+    "nullifier of the attested credential, which is spent here (rotate-on-attest) — never published again, so it links to nothing later",
+    "rotated commitment (same credential under a fresh secret — indistinguishable from any other commitment)",
   ],
   private: [
+    "which credential was used",
     "origin",
     "material type",
     "carbon class (only the ≤ threshold comparison is proven, never the value itself)",
     "upstream supplier",
-    ...(profile === "regulator"
-      ? ["note: publishing the nullifier makes this attestation linkable to any later transfer of the same credential"]
-      : []),
   ],
 });
 

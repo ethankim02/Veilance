@@ -94,7 +94,11 @@ export const forTransfer = (
   newBatchSecret,
 });
 
-/** Prime the state for the attest* circuits (holding only, minting nothing). */
+/**
+ * Prime the state with a held credential only. The attest* circuits also
+ * rotate the credential and read `newBatchSecret` — use {@link forAttest}
+ * for them; `forHold` leaves whatever secret `base` carries.
+ */
 export const forHold = (
   base: VeilancePrivateState,
   held: Credential,
@@ -102,6 +106,29 @@ export const forHold = (
   ...base,
   held,
   issueSpec: null,
+});
+
+/**
+ * Prime the state for the attest* circuits. They spend `held` and re-mint it
+ * to the same owner under `newBatchSecret` (rotate-on-attest), so the caller
+ * must pick fresh randomness and, on success, keep {@link rotated} as the
+ * credential it now holds.
+ */
+export const forAttest = (
+  base: VeilancePrivateState,
+  held: Credential,
+  newBatchSecret: Uint8Array,
+): VeilancePrivateState => ({
+  ...base,
+  held,
+  issueSpec: null,
+  newBatchSecret,
+});
+
+/** The credential an attest* call leaves the holder with: same fields, new secret. */
+export const rotated = (held: Credential, newBatchSecret: Uint8Array): Credential => ({
+  ...held,
+  batchSecret: newBatchSecret,
 });
 
 // ---------------------------------------------------------------------------

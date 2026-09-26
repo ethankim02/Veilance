@@ -9,7 +9,7 @@
 // contract/e2e/run.ts uses — reused, not forked.
 
 import { setPrivateState, currentLedger } from "../../contract/e2e/lib/party.js";
-import { forHold, forIssue, forTransfer, type VeilancePrivateState } from "../../contract/src/witnesses.js";
+import { forAttest, forIssue, forTransfer, type VeilancePrivateState } from "../../contract/src/witnesses.js";
 import { sealCredential, scanInbox, type SealableCredential } from "../../contract/src/sealed-entry.js";
 import { pureCircuits, type Credential } from "../../contract/src/managed/veilance/contract/index.js";
 
@@ -298,6 +298,10 @@ export const startTransferJob = (partyName: PartyName, credentialId: string, bod
     const heldRecord = holder.file.heldCredentials.find((c) => c.id === credentialId);
     if (!heldRecord) throw new Error(`credential "${credentialId}" not found in ${partyName}'s vault`);
 
+    // A crashed attestation may have rotated this credential on chain already.
+    const ledgerForSettle = await currentLedger(holder.party.providers, appState.contractAddressOrThrow());
+    if (settlePendingRotation(heldRecord, ledgerForSettle, holder.party.privateState.partySecret)) savePartyFile(partyName, holder.file);
+
     // See resolvePartyId's doc comment: body.recipient need not be hosted here.
     const recipientId = fromHex(resolvePartyId(body.recipient));
     const newCarbonClass = BigInt(body.carbonClass);
@@ -380,27 +384,86 @@ export const startTransferJob = (partyName: PartyName, credentialId: string, bod
 
 export type AttestBody = { profile: VerifierProfileName; challenge: string };
 
+/**
+ * Rotate-on-attest recovery. If an earlier attest call chose a secret and the
+ * process died before recording the result, the rotated commitment may be on
+ * chain while the vault still holds the old secret. Adopt the pending secret
+ * iff its commitment is in the provenance tree; otherwise drop it (the call
+ * never landed). Returns true if the record changed.
+ */
+const settlePendingRotation = (
+  record: HeldCredential,
+  ledgerNow: Awaited<ReturnType<typeof currentLedger>>,
+  partySecret: Uint8Array,
+): boolean => {
+  if (!record.pendingBatchSecret) return false;
+  const candidate = pureCircuits.commitmentOf({ ...credentialToWitness(record), batchSecret: fromHex(record.pendingBatchSecret) });
+  if (ledgerNow.provenanceTree.findPathForLeaf(candidate)) {
+    const spent = pureCircuits.nullifierOf(fromHex(record.commitment), partySecret);
+    record.batchSecret = record.pendingBatchSecret;
+    record.commitment = toHex(candidate);
+    record.rotations = [...(record.rotations ?? []), { nullifier: toHex(spent), commitment: record.commitment, at: new Date().toISOString() }];
+  }
+  delete record.pendingBatchSecret;
+  return true;
+};
+
+/**
+ * Attest = prove the held credential meets `profile`, then (in the same
+ * circuit) spend it and re-mint it to ourselves under a fresh secret. The
+ * credential keeps its `id` (so the wallet shows the same card and graph
+ * edges still match); its current commitment and secret move on.
+ *
+ * Like transfer, this does not pre-block a CONSUMED credential: the
+ * contract's nullifier check is what rejects it, for every profile.
+ */
 export const startAttestJob = (partyName: PartyName, credentialId: string, body: AttestBody): Job => {
   const circuit = CIRCUIT_FOR_PROFILE[body.profile];
-  return enqueueJob(partyName, circuit, async ({ setStage }) => {
+  return enqueueJob(partyName, circuit, async ({ setStage, jobId }) => {
     setStage("preparing");
     const holder = appState.partyOrThrow(partyName);
     const contract = appState.contractOrThrow(partyName);
     const heldRecord = holder.file.heldCredentials.find((c) => c.id === credentialId);
     if (!heldRecord) throw new Error(`credential "${credentialId}" not found in ${partyName}'s vault`);
 
+    const ledgerBefore = await currentLedger(holder.party.providers, appState.contractAddressOrThrow());
+    if (settlePendingRotation(heldRecord, ledgerBefore, holder.party.privateState.partySecret)) savePartyFile(partyName, holder.file);
+
     const heldWitness = credentialToWitness(heldRecord);
-    await setPrivateState(holder.party, forHold(holder.party.privateState, heldWitness));
+    const newBatchSecret = crypto.getRandomValues(new Uint8Array(32));
+    // Persist the secret before proving: once the transaction lands, this is
+    // the only copy of the rotated credential's pre-image.
+    heldRecord.pendingBatchSecret = toHex(newBatchSecret);
+    savePartyFile(partyName, holder.file);
+    await setPrivateState(holder.party, forAttest(holder.party.privateState, heldWitness, newBatchSecret));
 
     const challengeBytes = fromHex(body.challenge);
 
     setStage("proving");
-    const res =
-      body.profile === "consumer"
-        ? await contract.callTx.attestConsumer(challengeBytes)
-        : body.profile === "procurement"
-          ? await contract.callTx.attestProcurement(challengeBytes)
-          : await contract.callTx.attestRegulator(challengeBytes);
+    let res;
+    try {
+      res =
+        body.profile === "consumer"
+          ? await contract.callTx.attestConsumer(challengeBytes)
+          : body.profile === "procurement"
+            ? await contract.callTx.attestProcurement(challengeBytes)
+            : await contract.callTx.attestRegulator(challengeBytes);
+    } catch (err) {
+      // A contract rejection never lands, so the pending secret is dead. Any
+      // other failure (timeout, disconnect) might have landed — keep it for
+      // settlePendingRotation to resolve against the ledger next time.
+      if (/veilance:/.test(err instanceof Error ? err.message : String(err))) delete heldRecord.pendingBatchSecret;
+      throw err;
+    }
+    const [nullifier, newCommitment] = res.private.result as [Uint8Array, Uint8Array];
+
+    heldRecord.batchSecret = toHex(newBatchSecret);
+    heldRecord.commitment = toHex(newCommitment);
+    delete heldRecord.pendingBatchSecret;
+    heldRecord.rotations = [
+      ...(heldRecord.rotations ?? []),
+      { nullifier: toHex(nullifier), commitment: heldRecord.commitment, txHash: res.public.txHash, blockHeight: res.public.blockHeight, at: new Date().toISOString(), jobId },
+    ];
 
     const attestationKey = pureCircuits.attestationKeyOf(
       challengeBytes,
@@ -417,6 +480,8 @@ export const startAttestJob = (partyName: PartyName, credentialId: string, body:
         attestationKey: toHex(attestationKey),
         profile: body.profile,
         policyVersion: recorded.policyVersion.toString(),
+        nullifier: toHex(nullifier),
+        rotatedCommitment: heldRecord.commitment,
       },
     };
   });

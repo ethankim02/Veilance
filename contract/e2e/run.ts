@@ -30,7 +30,8 @@ import type { DeployedContract, FoundContract } from "@midnight-ntwrk/midnight-j
 import { Contract, pureCircuits } from "../src/managed/veilance/contract/index.js";
 import {
   createVeilancePrivateState,
-  forHold,
+  forAttest,
+  rotated,
   forIssue,
   forTransfer,
   partyIdOf,
@@ -404,10 +405,18 @@ const runFull = async (): Promise<void> => {
 
   // --- step 4: attestations --------------------------------------------------
   console.log("\nStep 4 — Battery Manufacturer proves policy to three verifier profiles...");
-  await setPrivateState(batteryMfr, forHold(batteryMfr.privateState, heldByBattery));
-  await report.time("attestConsumer", "batteryMfr", () => batteryContract.callTx.attestConsumer(CH1));
-  await report.time("attestProcurement", "batteryMfr", () => batteryContract.callTx.attestProcurement(CH2));
-  await report.time("attestRegulator", "batteryMfr", () => batteryContract.callTx.attestRegulator(CH3));
+  // Rotate-on-attest: each attestation spends the held credential and re-mints
+  // it under a fresh secret, so the next attestation must use the rotated one.
+  let batteryHeld: Credential = heldByBattery;
+  const attestOnce = async (name: "attestConsumer" | "attestProcurement" | "attestRegulator", ch: Uint8Array) => {
+    const fresh = crypto.getRandomValues(new Uint8Array(32));
+    await setPrivateState(batteryMfr, forAttest(batteryMfr.privateState, batteryHeld, fresh));
+    await report.time(name, "batteryMfr", () => batteryContract.callTx[name](ch));
+    batteryHeld = rotated(batteryHeld, fresh);
+  };
+  await attestOnce("attestConsumer", CH1);
+  await attestOnce("attestProcurement", CH2);
+  await attestOnce("attestRegulator", CH3);
 
   // --- step 5: ATTACK — replay the already-consumed credential --------------
   console.log("\nStep 5 — ATTACK: Refiner replays the already-consumed credential...");
@@ -454,8 +463,9 @@ const runFull = async (): Promise<void> => {
   report.finalLedger = snapshotLedger(finalLedger);
 
   report.expectationsMet = {
-    "provenance tree has 2 leaves": finalLedger.provenanceTree.firstFree() === 2n,
-    "nullifier set has 1 entry": finalLedger.nullifiers.size() === 1n,
+    // 2 issued/transferred + 3 rotations; 1 transfer + 3 attestations spent.
+    "provenance tree has 5 leaves": finalLedger.provenanceTree.firstFree() === 5n,
+    "nullifier set has 4 entries": finalLedger.nullifiers.size() === 4n,
     "attestations map has 3 entries": finalLedger.attestations.size() === 3n,
     "inbox has 2 entries": finalLedger.credentialInboxCount === 2n,
     "partyEncKeys has 4 entries": finalLedger.partyEncKeys.size() === 4n,

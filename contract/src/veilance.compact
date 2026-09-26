@@ -468,39 +468,80 @@ export circuit transferProvenance(entry: Bytes<192>): [Bytes<32>, Bytes<32>] {
 // --------------------------------------------------------------------------
 // Circuit 3 — Verify Policy (selective disclosure, run by the current owner)
 // --------------------------------------------------------------------------
+//
+// Every profile SPENDS the proven credential and re-mints it to the same owner
+// under a fresh batchSecret ("rotate on attest"). This gives two properties at
+// once:
+//   - credentialNotConsumed for EVERY profile: a credential already transferred
+//     (or already rotated) has its nullifier in `nullifiers`, so the attestation
+//     is rejected. Before this, consumer/procurement accepted consumed
+//     credentials because the historic provenance tree still contains them.
+//   - no linkability: the nullifier published here belongs to a credential that
+//     is dead from now on. The holder's next transfer/attestation spends the
+//     ROTATED credential, whose nullifier is a different, unrelated value. The
+//     old regulator design disclosed the nullifier WITHOUT spending it, so the
+//     later transfer re-published the same value and linked the two.
+// See CONTRACT_DESIGN.md "Rotate on attest".
 
-// Consumer profile: responsible sourcing only.
-export circuit attestConsumer(challenge: Bytes<32>): [] {
-  const [_secret, cred, _commitment] = provenCredential();
+// Spends (secret, cred, commitment) and inserts the same credential under a
+// fresh batchSecret. Owner, origin, material and carbon class carry over
+// unchanged — the circuit fixes them, so a rotation can never improve a
+// credential (the carbon class in particular stays exactly as it was).
+circuit rotateCredential(secret: Bytes<32>, cred: Credential, commitment: Bytes<32>): [Bytes<32>, Bytes<32>] {
+  const nullifier = nullifierOf(commitment, secret);
+  // DISCLOSURE: the nullifier of a credential that dies in this transaction.
+  // H(commitment, ownerSecret) — unlinkable to the commitment without the
+  // secret, and never published again (the rotated credential has its own).
+  assert(!nullifiers.member(disclose(nullifier)), "veilance: credential already consumed");
+  nullifiers.insert(disclose(nullifier));
+
+  // Bind the witness once (see transferProvenance for why).
+  const newSecret = newBatchSecret();
+  const rotated = Credential { ownerId: cred.ownerId,
+                               originId: cred.originId,
+                               materialType: cred.materialType,
+                               carbonClass: cred.carbonClass,
+                               batchSecret: newSecret };
+  const newCommitment = commitmentOf(rotated);
+  // DISCLOSURE: the rotated commitment — a one-way hash over fresh randomness,
+  // indistinguishable from any other commitment in the tree.
+  provenanceTree.insert(disclose(newCommitment));
+  return [disclose(nullifier), disclose(newCommitment)];
+}
+
+// Consumer profile: responsible sourcing + not consumed.
+export circuit attestConsumer(challenge: Bytes<32>): [Bytes<32>, Bytes<32>] {
+  const [secret, cred, commitment] = provenCredential();
   assertOriginCertified(cred.originId);
+  const out = rotateCredential(secret, cred, commitment);
   recordAttestation(challenge, cred.ownerId, VerifierProfile.consumer);
+  return out;
 }
 
 // OEM procurement profile: + supplier certification + carbon class under the
 // public threshold. The carbon class itself is never revealed.
-export circuit attestProcurement(challenge: Bytes<32>): [] {
-  const [_secret, cred, _commitment] = provenCredential();
+export circuit attestProcurement(challenge: Bytes<32>): [Bytes<32>, Bytes<32>] {
+  const [secret, cred, commitment] = provenCredential();
   assertOriginCertified(cred.originId);
   assertSupplierCertified(cred.ownerId);
   // The carbon class stays private: the circuit proves the comparison against
   // the public threshold without disclosing the class itself. An `assert` is
   // not a disclosure boundary, so no disclose() is needed or wanted here.
   assert(cred.carbonClass <= carbonThreshold, "veilance: carbon class exceeds the policy threshold");
+  const out = rotateCredential(secret, cred, commitment);
   recordAttestation(challenge, cred.ownerId, VerifierProfile.procurement);
+  return out;
 }
 
-// Regulator profile: + the credential has not been consumed downstream.
-export circuit attestRegulator(challenge: Bytes<32>): [] {
+// Regulator profile: the same checks as procurement. It used to be the only
+// profile that checked the consumed state; with rotate-on-attest every profile
+// does, so it now differs from procurement only by the profile code recorded.
+export circuit attestRegulator(challenge: Bytes<32>): [Bytes<32>, Bytes<32>] {
   const [secret, cred, commitment] = provenCredential();
   assertOriginCertified(cred.originId);
   assertSupplierCertified(cred.ownerId);
-  // As in attestProcurement: the class stays private, only the comparison is proven.
   assert(cred.carbonClass <= carbonThreshold, "veilance: carbon class exceeds the policy threshold");
-  // DISCLOSURE: the nullifier. Unavoidable — `nullifiers` is a public Set and
-  // any membership test reveals the element tested. See NOTES.md: this makes a
-  // regulator attestation linkable to the later spend of the same credential.
-  assert(!nullifiers.member(disclose(nullifierOf(commitment, secret))),
-         "veilance: credential already consumed"
-         );
+  const out = rotateCredential(secret, cred, commitment);
   recordAttestation(challenge, cred.ownerId, VerifierProfile.regulator);
+  return out;
 }

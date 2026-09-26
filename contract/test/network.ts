@@ -128,16 +128,31 @@ export class VeilanceNetwork {
     return this.call("transferProvenance", party, entry);
   }
 
-  attestConsumer(party: Party, challenge: Uint8Array): Promise<[]> {
-    return this.call("attestConsumer", party, challenge);
+  /**
+   * Rotate-on-attest: every attest* circuit spends the held credential and
+   * re-mints it under `newBatchSecret`. Like a real holder, pick fresh
+   * randomness before the call and, only if the call succeeds, keep the
+   * rotated credential as the one now held. Returns [nullifier, newCommitment].
+   */
+  private async attest(circuit: string, party: Party, challenge: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
+    const held = party.privateState.held;
+    const fresh = crypto.getRandomValues(new Uint8Array(32));
+    party.privateState = { ...party.privateState, newBatchSecret: fresh };
+    const out = await this.call<[Uint8Array, Uint8Array]>(circuit, party, challenge);
+    if (held) party.privateState = { ...party.privateState, held: { ...held, batchSecret: fresh } };
+    return out;
   }
 
-  attestProcurement(party: Party, challenge: Uint8Array): Promise<[]> {
-    return this.call("attestProcurement", party, challenge);
+  attestConsumer(party: Party, challenge: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
+    return this.attest("attestConsumer", party, challenge);
   }
 
-  attestRegulator(party: Party, challenge: Uint8Array): Promise<[]> {
-    return this.call("attestRegulator", party, challenge);
+  attestProcurement(party: Party, challenge: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
+    return this.attest("attestProcurement", party, challenge);
+  }
+
+  attestRegulator(party: Party, challenge: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
+    return this.attest("attestRegulator", party, challenge);
   }
 }
 

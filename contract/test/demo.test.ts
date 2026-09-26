@@ -318,8 +318,8 @@ describe("Veilance demo", () => {
 
     // The ledger is untouched: no new commitment, no new nullifier.
     expect(snapshot(net.ledger())).toEqual(before);
-    expect(net.ledger().nullifiers.size()).toBe(1n);
-    expect(net.ledger().provenanceTree.firstFree()).toBe(2n);
+    expect(net.ledger().nullifiers.size()).toBe(before.nullifierCount);
+    expect(net.ledger().provenanceTree.firstFree()).toBe(before.provenanceLeafCount);
   });
 
   it("selective disclosure — procurement fails once the carbon threshold drops below the (private) class", async () => {
@@ -353,10 +353,23 @@ describe("Veilance demo", () => {
   it("hijack — a second holder replaying the challenge lands on a DIFFERENT key, so binding is by lookup, not by rejection", async () => {
     const sizeBefore = net.ledger().attestations.size();
 
-    // The Refiner holds credA. It was consumed in step 3, but attestConsumer
-    // does not check the nullifier set (documented limitation S-5), so this is
-    // a perfectly valid consumer-profile proof by a DIFFERENT holder.
-    refiner.privateState = forHold(refiner.privateState, credA);
+    // Give the Refiner a fresh, live credential (its credA was consumed in
+    // step 3, and every profile now rejects consumed credentials), so this is a
+    // perfectly valid consumer-profile proof by a DIFFERENT holder.
+    const credHijack: Credential = {
+      ownerId: REFINER_ID,
+      originId: ORIGIN_CONGO_MINE_X,
+      materialType: MATERIAL_COBALT,
+      carbonClass: 1n,
+      batchSecret: bytes32("batch:hijacker"),
+    };
+    mine.privateState = forIssue(
+      mine.privateState,
+      { originId: credHijack.originId, materialType: credHijack.materialType, carbonClass: 1n, batchSecret: credHijack.batchSecret },
+      REFINER_ID,
+    );
+    await net.issueProvenance(mine, sealTo(net, credHijack));
+    refiner.privateState = forHold(refiner.privateState, credHijack);
 
     // CH1 is the very challenge the Battery Manufacturer already answered.
     await expect(net.attestConsumer(refiner, CH1)).resolves.toBeDefined();
@@ -580,10 +593,12 @@ describe("Veilance negative cases", () => {
     ).resolves.toBeDefined();
   });
 
-  // Documented MVP limitation, not a bug: attestConsumer / attestProcurement do
-  // NOT check the nullifier set (only attestRegulator does), so a credential
-  // that has already been passed downstream still satisfies those two profiles.
-  it("KNOWN LIMITATION: a consumed credential still passes the consumer profile", async () => {
+  // Rotate-on-attest (CONTRACT_DESIGN.md). Every attest* circuit spends the
+  // proven credential and re-mints it to the same owner, so:
+  //   - a credential already passed downstream fails EVERY profile;
+  //   - the nullifier an attestation publishes is never published again, so
+  //     the attestation cannot be linked to the holder's later transfer.
+  it("every profile rejects a consumed credential", async () => {
     const admin = newAdmin();
     const net = await VeilanceNetwork.deploy(admin);
     await bootstrap(net, admin);
@@ -598,12 +613,7 @@ describe("Veilance negative cases", () => {
     };
     mine.privateState = forIssue(
       mine.privateState,
-      {
-        originId: ORIGIN_CONGO_MINE_X,
-        materialType: MATERIAL_COBALT,
-        carbonClass: 3n,
-        batchSecret: BATCH_1,
-      },
+      { originId: ORIGIN_CONGO_MINE_X, materialType: MATERIAL_COBALT, carbonClass: 3n, batchSecret: BATCH_1 },
       REFINER_ID,
     );
     await net.issueProvenance(mine, sealTo(net, credential));
@@ -612,28 +622,63 @@ describe("Veilance negative cases", () => {
     refiner.privateState = forTransfer(refiner.privateState, credential, BATTERY_ID, 4n, BATCH_2);
     await net.transferProvenance(
       refiner,
-      sealTo(net, {
-        ownerId: BATTERY_ID,
-        originId: ORIGIN_CONGO_MINE_X,
-        materialType: MATERIAL_COBALT,
-        carbonClass: 4n,
-        batchSecret: BATCH_2,
-      }),
+      sealTo(net, { ownerId: BATTERY_ID, originId: ORIGIN_CONGO_MINE_X, materialType: MATERIAL_COBALT, carbonClass: 4n, batchSecret: BATCH_2 }),
     );
 
-    // The Refiner has spent it, yet the consumer profile still accepts it...
     refiner.privateState = forHold(refiner.privateState, credential);
-    await net.attestConsumer(refiner, bytes32("challenge:stale-consumer"));
-    expect(
-      net.ledger().attestations.lookup(
-        attKey(bytes32("challenge:stale-consumer"), REFINER_ID, CONSUMER),
-      ),
-    ).toEqual({ profile: CONSUMER, policyVersion: 5n });
+    const before = snapshot(net.ledger());
+    await expect(net.attestConsumer(refiner, bytes32("challenge:stale-consumer"))).rejects.toThrow(/credential already consumed/);
+    await expect(net.attestProcurement(refiner, bytes32("challenge:stale-procurement"))).rejects.toThrow(/credential already consumed/);
+    await expect(net.attestRegulator(refiner, bytes32("challenge:stale-regulator"))).rejects.toThrow(/credential already consumed/);
+    expect(snapshot(net.ledger())).toEqual(before);
+  });
 
-    // ...while the regulator profile, which checks the nullifier, rejects it.
-    await expect(
-      net.attestRegulator(refiner, bytes32("challenge:stale-regulator")),
-    ).rejects.toThrow(/credential already consumed/);
+  it("an attestation rotates the credential: the old one is dead, the new one still transfers, and nothing links the two", async () => {
+    const admin = newAdmin();
+    const net = await VeilanceNetwork.deploy(admin);
+    await bootstrap(net, admin);
+
+    const mine = newMine();
+    const credential: Credential = {
+      ownerId: REFINER_ID,
+      originId: ORIGIN_CONGO_MINE_X,
+      materialType: MATERIAL_COBALT,
+      carbonClass: 3n,
+      batchSecret: BATCH_1,
+    };
+    mine.privateState = forIssue(
+      mine.privateState,
+      { originId: ORIGIN_CONGO_MINE_X, materialType: MATERIAL_COBALT, carbonClass: 3n, batchSecret: BATCH_1 },
+      REFINER_ID,
+    );
+    const issued = await net.issueProvenance(mine, sealTo(net, credential));
+
+    const refiner = newRefiner();
+    refiner.privateState = forHold(refiner.privateState, credential);
+    const leavesBefore = net.ledger().provenanceTree.firstFree();
+    const [attNullifier, rotatedCommitment] = await net.attestProcurement(refiner, bytes32("challenge:rotate"));
+
+    // One nullifier and one fresh leaf were added; the rotated commitment is a
+    // new, unrelated value (same owner/origin/material/class, fresh secret).
+    expect(net.ledger().nullifiers.member(attNullifier)).toBe(true);
+    expect(net.ledger().provenanceTree.firstFree()).toBe(leavesBefore + 1n);
+    expect(hex(rotatedCommitment)).not.toBe(hex(issued));
+    const rotated = refiner.privateState.held!;
+    expect(hex(pureCircuits.commitmentOf(rotated))).toBe(hex(rotatedCommitment));
+    expect(rotated.carbonClass).toBe(3n);
+
+    // The pre-rotation credential is dead for every operation.
+    const stale = new Party("stale-refiner", forHold(refiner.privateState, credential));
+    await expect(net.attestConsumer(stale, bytes32("challenge:reuse-old"))).rejects.toThrow(/credential already consumed/);
+
+    // The rotated credential still transfers, and its transfer publishes a
+    // DIFFERENT nullifier from the attestation's — no on-chain link between them.
+    refiner.privateState = forTransfer(refiner.privateState, rotated, BATTERY_ID, 4n, BATCH_2);
+    const [transferNullifier] = await net.transferProvenance(
+      refiner,
+      sealTo(net, { ownerId: BATTERY_ID, originId: ORIGIN_CONGO_MINE_X, materialType: MATERIAL_COBALT, carbonClass: 4n, batchSecret: BATCH_2 }),
+    );
+    expect(hex(transferNullifier)).not.toBe(hex(attNullifier));
   });
 
   // Witnesses are untrusted code that may return a DIFFERENT value on every

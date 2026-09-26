@@ -4,9 +4,8 @@
 // proof, so every predicate that profile's circuit checks is necessarily
 // `true` — there is no partial-pass state on-chain. Predicates a profile's
 // circuit does NOT check are reported `null` ("not evaluated by this
-// profile"), matching spec.md's result table ("—" cells) exactly, including
-// the documented known limitation that only the Regulator profile checks
-// "Duplicate claim" (nullifier / consumed-state).
+// profile"). Since rotate-on-attest (CONTRACT_DESIGN.md) every profile spends
+// the credential it proves with, so every profile checks "Duplicate claim".
 
 import type { VerifierProfileName } from "./types.js";
 
@@ -32,13 +31,14 @@ const LABELS: Record<(typeof ALL_KEYS)[number], string> = {
 
 /** Which predicates each profile's circuit actually checks (spec.md §4.2.3 result table). */
 const CHECKED_BY_PROFILE: Record<VerifierProfileName, ReadonlySet<(typeof ALL_KEYS)[number]>> = {
-  consumer: new Set(["responsibleSourcing", "chainOfCustody", "restrictedSource"]),
+  consumer: new Set(["responsibleSourcing", "chainOfCustody", "restrictedSource", "duplicateClaim"]),
   procurement: new Set([
     "responsibleSourcing",
     "chainOfCustody",
     "supplierCertification",
     "carbonThreshold",
     "restrictedSource",
+    "duplicateClaim",
   ]),
   regulator: new Set([
     "responsibleSourcing",

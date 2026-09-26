@@ -443,7 +443,7 @@ v1 은 폼 페이지 9개로 구성된 프로토콜 콘솔이었고, 글이 많�
 | Supplier certification | — | ✓ | ✓ |
 | Carbon class ≤ threshold | — | ✓ (값 비공개) | ✓ (값 비공개) |
 | Restricted source | ✗ | ✗ | ✗ |
-| Duplicate claim | — | — | ✗ |
+| Duplicate claim | ✗ | ✗ | ✗ |
 
 | 비공개 항목 | 표시 |
 |---|---|
@@ -484,8 +484,8 @@ v1 은 폼 페이지 9개로 구성된 프로토콜 콘솔이었고, 글이 많�
 - 정책 변경 후 이전 attestation 조회 → 저장된 policyVersion ≠ 현재 → "재검증 필요" 표시 (freshness 테스트)
 - challenge 엔트로피 부족 (예: 순번) → attestation 키에서 holder partyId 사전 공격 가능. 클라이언트에서 항상 CSPRNG, 사용자 입력 금지
 - carbon threshold 가 낮아진 뒤 Procurement 증명 → ✅ 실패 (selective disclosure 테스트). 사전 검사에서 경고
-- 이미 소비된 credential 로 Consumer / Procurement 증명 → ⚠️ 통과함 (KNOWN LIMITATION). Regulator 만 거부. verifier 화면에 "Duplicate claim 은 Regulator 프로필에서만 확인됨" 명시
-- Regulator 증명은 nullifier 를 공개하므로 이후 같은 credential 의 transfer 와 연결 가능 → holder 제출 화면에 경고
+- 이미 소비된 credential 로 어떤 프로필이든 증명 → ✅ 거부 (rotate-on-attest, CONTRACT_DESIGN.md §9)
+- 증명은 사용한 credential 을 소비하고 새 secret 으로 재발행하므로, 공개된 nullifier 는 이후 transfer 와 연결되지 않음
 - holder 가 미인증 상태에서 Procurement 이상 요청 → 실패. 데모에서는 Battery Manufacturer 도 certifySupplier 필요
 - verifier 가 결과를 확인하기 전 tx 가 pending → PENDING 표시, 확정 후 갱신
 
@@ -494,7 +494,7 @@ v1 은 폼 페이지 9개로 구성된 프로토콜 콘솔이었고, 글이 많�
 - [x]  challenge 에 holder partyId 바인딩 → **확정·구현됨.** attestation 키 = `H(challenge, ownerId, profile)` 을 회로 안에서 계산. 근거: Verifiable Presentation 의 nonce + audience 바인딩과 같은 원리. 컨트랙트 v2, 테스트 20개 통과
 - [ ]  Verifier 계정을 L3 에 둘지, 완전 익명(링크만)으로 할지
 - [ ]  결과 화면을 공개 URL 로 둘지 (challenge 를 아는 사람은 누구나 조회 가능)
-- [ ]  Consumer 프로필에도 duplicate claim 검사를 넣을지 (nullifier 공개 범위 확대와 trade-off)
+- [x]  Consumer 프로필에도 duplicate claim 검사 → **확정·구현됨.** 모든 프로필이 rotate-on-attest 로 credential 을 소비·재발행 (CONTRACT_DESIGN.md §9)
 - [x]  attestation 만료 → **확정·구현됨.** attestation 값에 증명 시점 policyVersion 을 기록하고 무효 판단은 verifier 가 함. 컨트랙트는 만료시키지 않음
 
 ---

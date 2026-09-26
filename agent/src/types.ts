@@ -102,9 +102,14 @@ export type CredentialStatus = "ACTIVE" | "CONSUMED";
  * GET /parties/:party/credentials shape (see {@link toPublicCredential}).
  */
 export type HeldCredential = {
-  /** = commitment, hex. Used as the `:id` path segment in credential routes. */
+  /**
+   * = the commitment this credential ARRIVED with, hex. Stable for the
+   * credential's whole life: it is the `:id` path segment in credential
+   * routes and the key graph edges match on, even after rotations.
+   */
   readonly id: string;
-  readonly commitment: string;
+  /** The CURRENT commitment. Equals `id` until the first attestation rotates it. */
+  commitment: string;
   readonly ownerId: string;
   readonly originId: string;
   readonly originLabel?: string;
@@ -112,7 +117,17 @@ export type HeldCredential = {
   readonly materialType: string;
   readonly materialLabel?: string;
   readonly carbonClass: number;
-  readonly batchSecret: string;
+  /** The CURRENT batch secret — replaced on every rotation. */
+  batchSecret: string;
+  /**
+   * Rotate-on-attest (CONTRACT_DESIGN.md): the secret chosen for an attest
+   * call that has not been settled yet. Written to disk BEFORE the call, so
+   * a crash after the transaction lands cannot lose the rotated credential —
+   * `settlePendingRotation` adopts it once its commitment is on chain.
+   */
+  pendingBatchSecret?: string;
+  /** One entry per attestation that rotated this credential, oldest first. */
+  rotations?: CredentialRotation[];
   status: CredentialStatus;
   readonly receivedAt: string;
   readonly inboxIndex?: number;
@@ -131,10 +146,19 @@ export type HeldCredential = {
   consumedByJobId?: string;
 };
 
-export type PublicCredential = Omit<HeldCredential, "batchSecret" | "ownerId">;
+export type CredentialRotation = {
+  readonly nullifier: string;
+  readonly commitment: string;
+  readonly txHash?: string;
+  readonly blockHeight?: number;
+  readonly at: string;
+  readonly jobId?: string;
+};
+
+export type PublicCredential = Omit<HeldCredential, "batchSecret" | "ownerId" | "pendingBatchSecret">;
 
 export const toPublicCredential = (c: HeldCredential): PublicCredential => {
-  const { batchSecret: _batchSecret, ownerId: _ownerId, ...pub } = c;
+  const { batchSecret: _batchSecret, ownerId: _ownerId, pendingBatchSecret: _pending, ...pub } = c;
   // Vaults written before inboxIndex became a number may hold decimal strings.
   const raw = (c as { inboxIndex?: number | string }).inboxIndex;
   return { ...pub, inboxIndex: raw === undefined ? undefined : Number(raw) };
