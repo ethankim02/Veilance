@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Veilance Party Agent — long-lived Node HTTP service hosting the demo parties against the Veilance contract on a Midnight devnet",
+  "description": "Veilance Party Agent \u2014 long-lived Node HTTP service hosting the demo parties against the Veilance contract on a Midnight devnet",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "v2": "tsx src/v2/main.ts",
+    "v2:e2e": "tsx src/v2/e2e.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:wallet && npm run test:shared",
     "test:wallet": "tsx src/walletRequests.test.ts",
