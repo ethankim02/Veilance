@@ -10,7 +10,7 @@ import { qk, useChallenges, useGraph, useVerify } from '@/hooks/queries';
 import { cx } from '@/lib/format';
 import { CHAIN, CHECK_HELP, PARTIES, PRIVATE_ROWS, PROFILE_HELP, PROFILES, VERIFIER, profileLabel, shortName } from '@/lib/registry';
 
-function useStatus(c: Challenge) {
+export function useStatus(c: Challenge) {
   useI18n();
   const v = useVerify(c.challenge, c.holder, c.profile);
   const r = v.data;
@@ -37,7 +37,7 @@ function RequestRow({ c }: { c: Challenge }) {
   );
 }
 
-function RequestDetail({ c }: { c: Challenge }) {
+export function RequestDetail({ c, backTo = "?org=verifier", footer }: { c: Challenge; backTo?: string; footer?: React.ReactNode }) {
   useI18n();
   const v = useVerify(c.challenge, c.holder, c.profile);
   const graph = useGraph();
@@ -45,7 +45,7 @@ function RequestDetail({ c }: { c: Challenge }) {
   const s = useStatus(c);
   return (
     <>
-      <Link to={{ pathname: '/', search: '?org=verifier' }} className="text-[12px] text-ink-400 hover:text-ink-100">
+      <Link to={{ pathname: '/', search: backTo }} className="text-[12px] text-ink-400 hover:text-ink-100">
         {t("‹ Requests")}</Link>
       <div className="mt-3 flex items-center justify-between text-[14px]">
         <span>
@@ -59,6 +59,7 @@ function RequestDetail({ c }: { c: Challenge }) {
       <p className="mt-2 text-xs text-ink-400">{t("A zero-knowledge proof checks private data against this contract’s policy. It is not a laboratory test or a named regulatory certificate.")}</p>
       {v.data?.status === 'PENDING' && <p className="mt-3 text-sm text-ink-200">{t("Waiting for {company} to select a lot and submit a proof.", { company: PARTIES[c.holder].org })}</p>}
       {v.data?.status === 'STALE' && <p className="mt-3 text-sm text-amber">{t("These results use an older policy. Return to Requests and request a new proof under the current policy.")}</p>}
+      {footer}
       <ErrorLine error={v.error} />
       <Heading>{t("What this proof checks")}</Heading>
       <div className="mt-3 divide-y divide-ink-700/70 rounded-md border border-ink-700">

@@ -22,7 +22,7 @@ function CertifyOrg({ party }: { party: PartyName }) {
   );
 }
 
-export function PolicyDrawer({ onClose }: { onClose: () => void }) {
+export function PolicyDrawer({ onClose, inline = false }: { onClose: () => void; inline?: boolean }) {
   useI18n();
   const policy = usePolicy();
   const graph = useGraph();
@@ -41,7 +41,7 @@ export function PolicyDrawer({ onClose }: { onClose: () => void }) {
     graph.data?.nodes.find((x) => x.id === p)?.certified ?? policy.data?.suppliers.some((s) => s.partyName === p || s.org === PARTIES[p].org) ?? false;
 
   return (
-    <Drawer title={t("Policy v{version}", { version: policy.data?.policyVersion ?? "—" })} onClose={onClose}>
+    <Drawer inline={inline} title={t("Policy v{version}", { version: policy.data?.policyVersion ?? "—" })} onClose={onClose}>
       <p className="mb-4 text-[13px] leading-relaxed text-ink-300">{t("These are the sourcing checks configured for this contract. No specific law, external certification scheme or laboratory test is linked here.")}</p>
       <p className="mb-4 text-xs text-ink-400">{t("Carbon class is a numeric category, not a CO₂ measurement. Changing the policy makes older proof results require re-verification.")}</p>
       <form

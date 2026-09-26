@@ -426,11 +426,16 @@ export function createMockApi(): VeilanceApi {
           if (!isCertified(party)) throw new Reject('veilance: supplier not certified');
           if ((lot.carbonClass ?? 0) > S.carbonThreshold) throw new Reject('veilance: carbon class exceeds threshold');
         }
-        if (input.profile === 'regulator' && lot.status === 'CONSUMED') throw new Reject('veilance: credential already consumed');
+        // Rotate-on-attest: every profile spends the credential, so a consumed one fails them all.
+        if (lot.status === 'CONSUMED') throw new Reject('veilance: credential already consumed');
         const policyVersion = String(S.policyVersion);
+        const nullifier = nullifierOf(lot.commitment);
+        const rotatedCommitment = fakeHash('veilance:cm', lot.commitment, key);
         return {
-          result: { attestationKey: key, profile: input.profile, policyVersion },
+          result: { attestationKey: key, profile: input.profile, policyVersion, nullifier, rotatedCommitment },
           apply: (job) => {
+            // Same card (credentialId), new current commitment.
+            lot.commitment = rotatedCommitment;
             S.attestations.push({
               holder: party,
               profile: input.profile,
@@ -440,7 +445,7 @@ export function createMockApi(): VeilanceApi {
               blockHeight: job.blockHeight!,
               challenge,
               createdAt: job.finishedAt!,
-              ...(input.profile === 'regulator' ? { nullifier: nullifierOf(lot.commitment) } : {}),
+              nullifier,
             });
           },
         };
@@ -484,7 +489,7 @@ export function createMockApi(): VeilanceApi {
       supplierCertification: profile !== 'consumer',
       carbonThreshold: profile !== 'consumer',
       restrictedSource: true,
-      duplicateClaim: profile === 'regulator',
+      duplicateClaim: true,
     };
     const labels: Record<string, string> = {
       responsibleSourcing: 'Responsible sourcing',

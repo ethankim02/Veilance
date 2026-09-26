@@ -31,9 +31,9 @@ export const PROFILE_CODE: Record<Profile, number> = { consumer: 1, procurement:
 export const PRIVATE_ROWS = ['Upstream supplier', 'Origin', 'Quantity', 'Commercial terms'];
 
 export const PROFILE_HELP: Record<Profile, string> = {
-  consumer: 'Checks certified origin and a valid provenance record. Does not check carbon or whether the lot was already used.',
-  procurement: 'Adds supplier certification and the carbon limit to the origin and provenance checks. Does not check whether the lot was already used.',
-  regulator: 'Adds a check that the lot has not been consumed. Publishes a lot identifier (nullifier) that can be used to track its consumed state.',
+  consumer: 'Checks certified origin, a valid provenance record, and that the lot has not already been passed on.',
+  procurement: 'Adds supplier certification and the carbon limit to the consumer checks.',
+  regulator: 'The same checks as procurement, recorded under the regulator level.',
 };
 export const CHECK_HELP: Record<string, string> = {
   responsibleSourcing: 'The origin belongs to the policy’s approved origins.',

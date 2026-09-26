@@ -6,7 +6,7 @@ import { bus } from '@/lib/bus';
 import { cx, reason } from '@/lib/format';
 import { STAGE_WORD, elapsedMs, expectedMs, isActive } from '@/lib/progress';
 
-export function StatusBar() {
+export function StatusBar({ extra }: { extra?: React.ReactNode }) {
   useI18n();
   const graph = useGraph();
   const active = graph.data?.activeJob;
@@ -52,7 +52,10 @@ export function StatusBar() {
         />
       )}
       <span className={cx('tabular-nums', tone)}>{text}</span>
-      {queued > 0 && <span className="ml-auto text-ink-400">+{queued} {t("Queued")}</span>}
+      <span className="ml-auto flex items-center">
+        {queued > 0 && <span className="text-ink-400">+{queued} {t("Queued")}</span>}
+        {extra}
+      </span>
     </footer>
   );
 }

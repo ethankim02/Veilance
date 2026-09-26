@@ -58,7 +58,7 @@ export function CheckInbox({ party }: { party: PartyName }) {
   );
 }
 
-function IssueForm() {
+export function IssueForm() {
   useI18n();
   const policy = usePolicy();
   const parties = useParties();
