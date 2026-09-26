@@ -29,11 +29,13 @@ import {
   nodeState,
   openPeriod,
   processLots,
+  profileView,
   readLedger,
   scanTenant,
   setCarbonThreshold,
   tenantByApiKey,
   tenantView,
+  tenantsWithStatus,
   transfer,
   type Runtime,
 } from "./node.js";
@@ -75,9 +77,9 @@ export const mountNode = (app: Hono): void => {
   );
   app.get(
     "/v2/admin/tenants",
-    authed((c, rt) => {
+    authed(async (c, rt) => {
       if (rt.file.role !== "admin") throw new ApiError("admin only", 403, "forbidden");
-      return c.json(allTenants().map(tenantView));
+      return c.json(await tenantsWithStatus());
     }),
   );
   app.post("/v2/admin/origins", authed(async (c, rt) => accepted(c, certifyOrigin(rt, (await body<{ label: string }>(c)).label))));
@@ -105,7 +107,8 @@ export const mountNode = (app: Hono): void => {
   app.post("/v2/admin/threshold", authed(async (c, rt) => accepted(c, setCarbonThreshold(rt, (await body<{ value: number }>(c)).value))));
 
   // --- company ---------------------------------------------------------------
-  app.get("/v2/me", authed((c, rt) => c.json(tenantView(rt))));
+  app.get("/v2/me", authed(async (c, rt) => c.json(await profileView(rt))));
+  app.get("/v2/jobs", authed((c, rt) => c.json([...rt.file.jobs].reverse().slice(0, 50))));
   app.get("/v2/directory", authed((c) => c.json(allTenants().filter((t) => t.file.role === "company").map((t) => ({ name: t.file.name, partyId: tenantView(t).partyId })))));
   app.get("/v2/jobs/:id", authed((c, rt) => {
     const job = getJob(pid(c));

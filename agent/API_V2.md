@@ -29,8 +29,18 @@ npm run v2:e2e
 | `VEILANCE_SPONSOR_URL` | this process | where a node reaches its sponsor |
 | `VEILANCE_SPONSOR_TOKEN` | dev token on the local devnet | bearer token a node presents to the sponsor |
 | `VEILANCE_SPONSOR_SEED` | dev seed on the local devnet | fee wallet seed (fund it from the faucet elsewhere) |
+| `VEILANCE_SPONSOR_TOKENS` | — | per-node tokens `name:token,…` (sponsor side) |
+| `VEILANCE_SPONSOR_DAILY_LIMIT` | `0` (unlimited) | balanced transactions per node per UTC day |
+| `VEILANCE_SPONSOR_STALL_MINUTES` | `10` | abandon a checkpoint that makes no sync progress this long |
+| `VEILANCE_V2_MASTER_KEY` | generated file on the local devnet | 64 hex; seals tenant secrets at rest |
+| `VEILANCE_V2_STATE_PASSWORD` | dev password on the local devnet | private-state database password |
+| `VEILANCE_V2_CONCURRENCY` | `1` | keep at 1 (see Limits) |
 
 Prerequisite: `npm run compile:zk:v2` in `contract/`.
+
+## Web UI
+
+`web` serves the platform UI at `/v2` (company and admin, sign in with an API key kept in the tab only) and `/v2/verify` (notified body and buyer checks, no account). Point it at a node with `VITE_V2_URL` (default `http://localhost:4100`). The v1 demo stays at `/`.
 
 ## Auth
 
@@ -45,7 +55,7 @@ All write operations return `202` with a job; poll `GET /v2/jobs/:id` until `sta
 |---|---|---|---|
 | POST | `/v2/admin/deploy` | — | deploy the v2 contract |
 | POST | `/v2/admin/tenants` | `{ name, partySecret?, certId? }` | → `{ id, partyId, certId, apiKey, registerJob }`. Omit `partySecret` to have the node generate it. Registers the receiving key automatically. |
-| GET | `/v2/admin/tenants` | — | tenant list |
+| GET | `/v2/admin/tenants` | — | tenant list with `supplier`, `recycler`, `receivingKey` from one ledger read |
 | POST | `/v2/admin/origins` | `{ label }` | approve an origin (mine site or recycling facility) |
 | POST | `/v2/admin/suppliers` | `{ partyId, certId }` | certify a supplier |
 | POST | `/v2/admin/recyclers` | `{ partyId, certId, isEu }` | certify a recycler; `isEu` decides the 1.3× column |
@@ -56,7 +66,8 @@ All write operations return `202` with a job; poll `GET /v2/jobs/:id` until `sta
 
 | Method | Path | Body | |
 |---|---|---|---|
-| GET | `/v2/me` | — | `{ id, name, partyId, certId, … }` |
+| GET | `/v2/me` | — | `{ id, name, partyId, certId, deployed, supplier, recycler: "eu" \| "other" \| null, receivingKey }` — certification read from the ledger |
+| GET | `/v2/jobs` | — | this tenant's latest 50 jobs, newest first |
 | GET | `/v2/directory` | — | company names and party ids on this node |
 | GET | `/v2/lots?status=ACTIVE` | — | vault lots (quantities in kg, recycled EU / other, origins with issuer ids) |
 | POST | `/v2/inbox/scan` | — | pull deliveries (also runs after every confirmed job) |
@@ -80,6 +91,28 @@ All write operations return `202` with a job; poll `GET /v2/jobs/:id` until `sta
 | POST | `/v2/public/declaration` | `{ owner, plant, period, material, totalKg?, salt? }` | `{ declared, shareBps, totalCommit, totalMatches? }` — the notified body's check |
 | POST | `/v2/public/attestation` | `{ challenge, owner, minQuantityKg }` | `{ attested, policyVersion, fresh }` — the buyer's check |
 
+## Preprod
+
+```bash
+# once: secrets into the git-ignored state folder (0600)
+mkdir -p .state/preprod/v2 && cd .state/preprod/v2 && umask 077
+openssl rand -hex 24 > sponsor-token; openssl rand -hex 32 > master-key; openssl rand -base64 24 > state-password
+cd -
+
+# every start (sponsor first; the node waits for it)
+set -a; . ./.env.preprod; set +a
+export VEILANCE_SPONSOR_SEED="$VEILANCE_FUNDER_SEED"          # faucet-funded
+export VEILANCE_SPONSOR_TOKEN="$(cat .state/preprod/v2/sponsor-token)"
+export VEILANCE_V2_MASTER_KEY="$(cat .state/preprod/v2/master-key)"
+export VEILANCE_V2_STATE_PASSWORD="$(cat .state/preprod/v2/state-password)"
+VEILANCE_V2_ROLE=sponsor VEILANCE_V2_PORT=4201 npm run v2
+VEILANCE_V2_ROLE=node VEILANCE_V2_PORT=4101 VEILANCE_SPONSOR_URL=http://localhost:4201 npm run v2
+# web against it
+cd ../web && VITE_V2_URL=http://localhost:4101 npx vite --port 5174
+```
+
+The proof server stays local (`127.0.0.1:6300`) — it sees witness data. The sponsor's first Preprod sync from scratch takes hours (DUST is the slow part); `/sponsor/health` shows per-sub-wallet progress. A checkpoint copied from another wallet can refuse to sync forward ("event with a timestamp prior to the time already synced to"); the stall watchdog then resyncs from scratch.
+
 ## Deploy
 
 All 14 verifier keys in one deploy transaction is ~31.5 KB and the node rejects it (`1010: Transaction would exhaust the block limits`). `POST /v2/admin/deploy` therefore deploys with 7 circuits and inserts the other 7 verifier keys with maintenance transactions signed by the contract's maintenance key, which stays in the admin tenant's private state store. On the local devnet this takes about 3 minutes.
@@ -90,7 +123,8 @@ Before proving, a job writes what it expects to change (`pending`) into the tena
 
 ## Limits
 
-- One node process per state directory; jobs are sequential per node.
-- The sponsor token is a single shared secret; per-node keys, quotas and billing are future work.
-- The sponsor's wallet checkpoint can fail to restore (indexer `Internal Server Error` on sync); moving `<state>/v2/sponsor-wallet` aside and resyncing fixes it on the local devnet.
-- Tenant secrets are stored unencrypted in the node's state directory — acceptable for a node the company or platform runs itself, not for a shared operator-hosted node.
+- One node process per state directory; jobs are sequential per node. `VEILANCE_V2_CONCURRENCY` exists but should stay 1: two transactions proven against the same ledger state conflict on the contract's shared write points (tree index, inbox counter). Measured: the second one lands as `FailFallible` and still pays its fee. Throughput is bounded by the contract, roughly one transaction every 30–50 s on the local devnet.
+- Secrets at rest: party secrets and receiving keys in tenant files are AES-256-GCM sealed with the node master key (`VEILANCE_V2_MASTER_KEY`, or a generated `<state>/master-key` on the local devnet); private-state databases use `VEILANCE_V2_STATE_PASSWORD`. Both are required outside the local devnet. Losing the master key makes the tenants unrecoverable.
+- Sponsor access: `VEILANCE_SPONSOR_TOKENS="nodeA:token1,nodeB:token2"` gives each node its own token; `VEILANCE_SPONSOR_DAILY_LIMIT` caps balanced transactions per node per UTC day (429 when exceeded). Usage is on `/sponsor/health`.
+- Sponsor checkpoint recovery: a wallet restored from a checkpoint that makes no sync progress for `VEILANCE_SPONSOR_STALL_MINUTES` (default 10) is moved aside and resynced from scratch automatically.
+- Billing for sponsored fees is not built; the daily limit is the only control.

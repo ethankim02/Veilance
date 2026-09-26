@@ -208,9 +208,16 @@ export const accountAfterConsume = (account: PeriodAccount, lot: Lot, newSecret:
   secret: newSecret,
 });
 
-/** The largest share (basis points) declareShare will accept for this account. */
-export const maxDeclarableBps = (a: PeriodAccount): bigint =>
-  a.totalKg === 0n ? 0n : ((a.recycledOtherKg * 10n + a.recycledEuKg * 13n) * 10000n) / (a.totalKg * 10n);
+/**
+ * The largest share (basis points) declareShare will accept for this account.
+ * The 1.3× EU factor can push the raw ratio past 100 %; the circuit caps a
+ * declaration at 10000 bps, so this does too.
+ */
+export const maxDeclarableBps = (a: PeriodAccount): bigint => {
+  if (a.totalKg === 0n) return 0n;
+  const raw = ((a.recycledOtherKg * 10n + a.recycledEuKg * 13n) * 10000n) / (a.totalKg * 10n);
+  return raw > 10000n ? 10000n : raw;
+};
 
 // ---------------------------------------------------------------------------
 // Lot arithmetic mirrored from the circuits, for callers that must know the

@@ -40,7 +40,7 @@ import { generateEncKeypair, scanLotInbox, sealLot } from "../../../contract/src
 import { checkDevnetHealth } from "../../../contract/e2e/lib/health.js";
 import { INDEXER_HTTP_URL, INDEXER_WS_URL, NETWORK_ID } from "../../../contract/e2e/lib/config.js";
 import { bytes32FromLabel, fromHex, labelFromBytes32, toHex } from "../bytes.js";
-import { ZK_V2_DIR } from "./config.js";
+import { V2_CONCURRENCY, ZK_V2_DIR } from "./config.js";
 import {
   V2_PRIVATE_STATE_ID,
   buildV2Providers,
@@ -230,7 +230,8 @@ type Outcome = { txHash?: string; blockHeight?: number; result?: Record<string, 
 type Work = { rt: Runtime; job: V2Job; exec: (job: V2Job) => Promise<Outcome> };
 
 const queue: Work[] = [];
-let draining = false;
+const busyTenants = new Set<string>();
+let running = 0;
 
 const FAILED_ASSERT = "failed assert: ";
 const assertMessage = (msg: string) => {
@@ -255,38 +256,48 @@ const enqueue = (rt: Runtime, op: string, exec: (job: V2Job) => Promise<Outcome>
   jobsById.set(job.id, job);
   saveTenant(rt.file);
   queue.push({ rt, job, exec });
-  void drain();
+  pump();
   return job;
 };
 
-const drain = async () => {
-  if (draining) return;
-  draining = true;
-  try {
-    while (queue.length) {
-      const { rt, job, exec } = queue.shift()!;
-      const started = Date.now();
-      job.stage = "proving";
-      try {
-        const out = await exec(job);
-        Object.assign(job, out, { stage: "confirmed" as const });
-      } catch (err) {
-        const msg = describeError(err);
-        const rejected = assertMessage(msg);
-        job.stage = rejected !== null ? "rejected" : err instanceof ApiError ? "rejected" : "failed";
-        job.error = rejected ?? msg;
-        // A contract rejection never lands, so its pending expectations are void.
-        if (rejected !== null && rt.file.pending?.jobId === job.id) rt.file.pending = null;
-      } finally {
-        job.finishedAt = now();
-        job.elapsedMs = Date.now() - started;
-        saveTenant(rt.file);
-      }
-      if ((job.stage as V2Job["stage"]) === "confirmed") await scanAll().catch((e) => console.warn("post-job inbox scan failed:", e));
-    }
-  } finally {
-    draining = false;
+/**
+ * Starts queued work up to V2_CONCURRENCY, never two jobs of the same tenant
+ * at once (a tenant's vault and private state are updated in job order).
+ */
+const pump = () => {
+  while (running < V2_CONCURRENCY) {
+    const i = queue.findIndex((w) => !busyTenants.has(w.rt.file.id));
+    if (i === -1) return;
+    const [work] = queue.splice(i, 1);
+    busyTenants.add(work.rt.file.id);
+    running += 1;
+    void execute(work).finally(() => {
+      busyTenants.delete(work.rt.file.id);
+      running -= 1;
+      pump();
+    });
   }
+};
+
+const execute = async ({ rt, job, exec }: Work) => {
+  const started = Date.now();
+  job.stage = "proving";
+  try {
+    const out = await exec(job);
+    Object.assign(job, out, { stage: "confirmed" as const });
+  } catch (err) {
+    const msg = describeError(err);
+    const rejected = assertMessage(msg);
+    job.stage = rejected !== null ? "rejected" : err instanceof ApiError ? "rejected" : "failed";
+    job.error = rejected ?? msg;
+    // A contract rejection never lands, so its pending expectations are void.
+    if (rejected !== null && rt.file.pending?.jobId === job.id) rt.file.pending = null;
+  } finally {
+    job.finishedAt = now();
+    job.elapsedMs = Date.now() - started;
+    saveTenant(rt.file);
+  }
+  if ((job.stage as V2Job["stage"]) === "confirmed") await scanAll().catch((e) => console.warn("post-job inbox scan failed:", e));
 };
 
 // ---------------------------------------------------------------------------
@@ -789,3 +800,41 @@ export const tenantView = (rt: Runtime) => ({
   certId: rt.file.certId,
   encPk: rt.file.encPk,
 });
+
+/** Every tenant with its certification status, from one ledger read (admin list). */
+export const tenantsWithStatus = async () => {
+  const l = nodeState.contractAddress ? await readLedger() : null;
+  return allTenants().map((rt) => {
+    const base = tenantView(rt);
+    if (!l) return { ...base, supplier: false, recycler: null as "eu" | "other" | null, receivingKey: false };
+    const pid = fromHex(base.partyId);
+    const cid = fromHex(rt.file.certId);
+    const recycler: "eu" | "other" | null = l.certifiedRecyclers.findPathForLeaf(pureCircuits.recyclerLeafOf(pid, cid, true))
+      ? "eu"
+      : l.certifiedRecyclers.findPathForLeaf(pureCircuits.recyclerLeafOf(pid, cid, false))
+        ? "other"
+        : null;
+    return {
+      ...base,
+      supplier: !!l.certifiedSuppliers.findPathForLeaf(pureCircuits.certLeafOf(pid, cid)),
+      recycler,
+      receivingKey: l.partyEncKeys.member(pid),
+    };
+  });
+};
+
+/** The tenant plus what the ledger says it may do — the UI shows only the actions that would succeed. */
+export const profileView = async (rt: Runtime) => {
+  const base = tenantView(rt);
+  if (!nodeState.contractAddress) return { ...base, deployed: false, supplier: false, recycler: null, receivingKey: false };
+  const l = await readLedger();
+  const pid = fromHex(base.partyId);
+  const cid = fromHex(rt.file.certId);
+  const supplier = !!l.certifiedSuppliers.findPathForLeaf(pureCircuits.certLeafOf(pid, cid));
+  const recycler = l.certifiedRecyclers.findPathForLeaf(pureCircuits.recyclerLeafOf(pid, cid, true))
+    ? "eu"
+    : l.certifiedRecyclers.findPathForLeaf(pureCircuits.recyclerLeafOf(pid, cid, false))
+      ? "other"
+      : null;
+  return { ...base, deployed: true, supplier, recycler, receivingKey: l.partyEncKeys.member(pid) };
+};
