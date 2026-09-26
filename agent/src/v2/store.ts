@@ -2,13 +2,14 @@
 // tenant under V2_STATE_DIR/tenants/<id>/tenant.json. The party secret lives
 // here, on the node's disk: whoever runs the node holds the keys.
 
-import { createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import type { Lot, PeriodAccount } from "../../../contract/src/witnesses_v2.js";
 import { fromHex, toHex } from "../bytes.js";
-import { V2_STATE_DIR } from "./config.js";
+import { IS_LOCAL_DEVNET } from "../../../contract/e2e/lib/config.js";
+import { MASTER_KEY_HEX, V2_STATE_DIR } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // JSON shapes (bigint → decimal string, bytes → hex)
@@ -186,9 +187,50 @@ export const newApiKey = () => `vk_${randomBytes(24).toString("hex")}`;
 
 const MAX_JOBS = 200;
 
+// ---------------------------------------------------------------------------
+// Secrets at rest: partySecret and encSk are sealed with the node master key
+// (AES-256-GCM, fresh IV per write, tenant id as AAD so a sealed value cannot
+// be moved into another tenant's file). In memory they stay plain hex.
+// ---------------------------------------------------------------------------
+
+const masterKeyPath = () => path.join(V2_STATE_DIR, "master-key");
+let masterKey: Buffer | null = null;
+const getMasterKey = (): Buffer => {
+  if (masterKey) return masterKey;
+  let hex = MASTER_KEY_HEX;
+  if (!hex && fs.existsSync(masterKeyPath())) hex = fs.readFileSync(masterKeyPath(), "utf8").trim();
+  if (!hex) {
+    if (!IS_LOCAL_DEVNET) throw new Error("VEILANCE_V2_MASTER_KEY (64 hex) is required outside the local devnet");
+    hex = randomBytes(32).toString("hex");
+    fs.mkdirSync(V2_STATE_DIR, { recursive: true });
+    fs.writeFileSync(masterKeyPath(), hex + "\n", { mode: 0o600 });
+    console.log(`Generated a local node master key at ${masterKeyPath()}`);
+  }
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error("node master key must be 64 hex characters");
+  masterKey = Buffer.from(hex, "hex");
+  return masterKey;
+};
+
+const SEALED = "enc:v1:";
+const seal = (tenantId: string, plainHex: string): string => {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", getMasterKey(), iv);
+  c.setAAD(Buffer.from(tenantId));
+  const ct = Buffer.concat([c.update(Buffer.from(plainHex, "hex")), c.final()]);
+  return SEALED + Buffer.concat([iv, c.getAuthTag(), ct]).toString("base64");
+};
+const unseal = (tenantId: string, value: string): string => {
+  if (!value.startsWith(SEALED)) return value; // written before encryption at rest existed
+  const raw = Buffer.from(value.slice(SEALED.length), "base64");
+  const d = createDecipheriv("aes-256-gcm", getMasterKey(), raw.subarray(0, 12));
+  d.setAAD(Buffer.from(tenantId));
+  d.setAuthTag(raw.subarray(12, 28));
+  return Buffer.concat([d.update(raw.subarray(28)), d.final()]).toString("hex");
+};
+
 export const saveTenant = (t: TenantFile): void => {
   if (t.jobs.length > MAX_JOBS) t.jobs = t.jobs.slice(-MAX_JOBS);
-  writeJsonAtomic(tenantPath(t.id), t);
+  writeJsonAtomic(tenantPath(t.id), { ...t, partySecret: seal(t.id, t.partySecret), encSk: seal(t.id, t.encSk) });
 };
 
 export const loadTenants = (): TenantFile[] => {
@@ -196,7 +238,13 @@ export const loadTenants = (): TenantFile[] => {
   return fs
     .readdirSync(tenantsDir())
     .filter((d) => fs.existsSync(tenantPath(d)))
-    .map((d) => JSON.parse(fs.readFileSync(tenantPath(d), "utf8")) as TenantFile);
+    .map((d) => {
+      const t = JSON.parse(fs.readFileSync(tenantPath(d), "utf8")) as TenantFile;
+      const plaintextOnDisk = !t.partySecret.startsWith(SEALED) || !t.encSk.startsWith(SEALED);
+      const open = { ...t, partySecret: unseal(t.id, t.partySecret), encSk: unseal(t.id, t.encSk) };
+      if (plaintextOnDisk) saveTenant(open); // migrate older files
+      return open;
+    });
 };
 
 const deploymentPath = () => path.join(V2_STATE_DIR, "deployment.json");

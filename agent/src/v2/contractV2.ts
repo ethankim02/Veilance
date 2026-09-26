@@ -24,8 +24,8 @@ import type { MidnightProvider, MidnightProviders, WalletProvider } from "@midni
 
 import { Contract, ledger as ledgerOf, type Ledger } from "../../../contract/src/managed/veilance_v2/contract/index.js";
 import { witnessesV2, type V2PrivateState } from "../../../contract/src/witnesses_v2.js";
-import { INDEXER_HTTP_URL, INDEXER_WS_URL, PRIVATE_STATE_PASSWORD, PROOF_SERVER_URL } from "../../../contract/e2e/lib/config.js";
-import { V2_STATE_DIR, ZK_V2_DIR } from "./config.js";
+import { INDEXER_HTTP_URL, INDEXER_WS_URL, PROOF_SERVER_URL } from "../../../contract/e2e/lib/config.js";
+import { V2_STATE_DIR, V2_STATE_PASSWORD, ZK_V2_DIR } from "./config.js";
 
 export const V2_PRIVATE_STATE_ID = "veilanceV2PrivateState" as const;
 export type V2PrivateStateId = typeof V2_PRIVATE_STATE_ID;
@@ -57,11 +57,12 @@ export type V2Contract = FoundContract<Contract<V2PrivateState>>;
 
 /** Providers for one tenant. Private state lives under that tenant's own directory. */
 export const buildV2Providers = (tenantId: string, wallet: WalletProvider & MidnightProvider): V2Providers => {
+  if (!V2_STATE_PASSWORD) throw new Error("VEILANCE_V2_STATE_PASSWORD is required outside the local devnet");
   const zkConfigProvider = new NodeZkConfigProvider<V2CircuitId>(ZK_V2_DIR);
   return {
     privateStateProvider: levelPrivateStateProvider<V2PrivateStateId, V2PrivateState>({
       accountId: `v2-${tenantId}`,
-      privateStoragePasswordProvider: () => PRIVATE_STATE_PASSWORD,
+      privateStoragePasswordProvider: () => V2_STATE_PASSWORD,
       levelFactory: (dbName: string) => new Level(path.join(V2_STATE_DIR, "tenants", tenantId, dbName)) as never,
     }),
     publicDataProvider: indexerPublicDataProvider(INDEXER_HTTP_URL, INDEXER_WS_URL),
