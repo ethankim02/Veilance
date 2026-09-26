@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Veilance \u2014 confidential supply-chain provenance contract for Midnight",
+  "description": "Veilance — confidential supply-chain provenance contract for Midnight",
   "scripts": {
     "compile": "compact compile +0.31.1 --skip-zk src/veilance.compact src/managed/veilance",
     "compile:zk": "compact compile +0.31.1 src/veilance.compact src/managed/veilance",
+    "compile:v2": "compact compile +0.31.1 --skip-zk src/veilance_v2.compact src/managed/veilance_v2",
+    "compile:zk:v2": "compact compile +0.31.1 src/veilance_v2.compact src/managed/veilance_v2",
     "format": "compact format +0.31.1 src/veilance.compact",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

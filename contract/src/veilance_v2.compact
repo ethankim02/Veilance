@@ -1,0 +1,743 @@
+// Veilance v2 — quantities, splitting, merging/processing and order-bound
+// attestations. Design: docs/PROVENANCE_V2.md.
+//
+// Same privacy model as v1: the ledger holds hashed leaves, a nullifier set,
+// opaque attestation keys and sealed ciphertexts. Quantities, materials,
+// origins, issuers, processing rules actually used and order sizes never
+// reach the ledger in the clear.
+
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+// --------------------------------------------------------------------------
+// Types
+// --------------------------------------------------------------------------
+
+// One origin a lot's material came from, and the certified party that issued
+// it. issuerId is written by issueLot from the issuer's own secret and only
+// ever copied afterwards, so it cannot be forged downstream.
+export struct OriginSlot {
+  originId: Bytes<32>;
+  issuerId: Bytes<32>;
+}
+
+// A provenance lot. Held privately by its owner; only its commitment reaches
+// the ledger. An empty origin slot is all-zero bytes.
+export struct Lot {
+  ownerId: Bytes<32>;
+  materialType: Bytes<32>;
+  quantity: Uint<32>; // kg
+  carbonClass: Uint<8>;
+  custody: Uint<8>; // 1 identity preserved, 2 segregated, 3 mass balance
+  origins: Vector<2, OriginSlot>;
+  recycledEuKg: Uint<32>; // recycled share recovered in the EU (1.3x factor)
+  recycledOtherKg: Uint<32>; // any other recycled share
+  batchSecret: Bytes<32>;
+}
+
+// A manufacturer's private running total for one (plant, period, material):
+// what it consumed into production and how much of that was recycled. Lives
+// in the provenance tree under its own commitment domain. docs/PLATFORM_LAYER.md §3.
+export struct PeriodAccount {
+  ownerId: Bytes<32>;
+  plantId: Bytes<32>;
+  period: Uint<32>;
+  materialType: Bytes<32>;
+  totalKg: Uint<32>;
+  recycledEuKg: Uint<32>;
+  recycledOtherKg: Uint<32>;
+  secret: Bytes<32>;
+}
+
+// What a certified root party issues. The owner and the issuer slot are fixed
+// by the circuit.
+export struct IssueSpec {
+  originId: Bytes<32>;
+  materialType: Bytes<32>;
+  quantity: Uint<32>;
+  carbonClass: Uint<8>;
+  custody: Uint<8>;
+  batchSecret: Bytes<32>;
+}
+
+export struct Attestation {
+  policyVersion: Uint<64>;
+}
+
+// A published plant/period declaration. totalCommit = H(total kg, salt): the
+// manufacturer opens it to the notified body, which checks the total against
+// the plant's production records. That is what catches material left out of
+// the account to inflate the share — the chain alone cannot know production.
+export struct Declaration {
+  shareBps: Uint<16>;
+  totalCommit: Bytes<32>;
+}
+
+// --------------------------------------------------------------------------
+// Ledger
+// --------------------------------------------------------------------------
+
+export sealed ledger adminId: Bytes<32>;
+
+export ledger policyVersion: Counter;
+
+export ledger carbonThreshold: Uint<8>;
+
+export ledger certifiedOrigins: MerkleTree<8, Bytes<32>>;
+
+export ledger certifiedSuppliers: MerkleTree<8, Bytes<32>>;
+
+// leaf = H("veilance:v2:rec", partyId, certId, isEu). Only these parties may
+// issue recycled lots; isEu decides which recycled column the lot fills.
+export ledger certifiedRecyclers: MerkleTree<8, Bytes<32>>;
+
+// One marker per opened (owner, plant, period, material) account, so a
+// manufacturer cannot keep parallel accounts and declare the best one.
+export ledger periodMarkers: Set<Bytes<32>>;
+
+// H("veilance:v2:decl", owner, plant, period, material) -> declared recycled
+// share in basis points. Public by design: the passport publishes it anyway.
+export ledger declarations: Map<Bytes<32>, Declaration>;
+
+// leaf = H("veilance:v2:rule", inMaterial, outMaterial, maxYieldPct). Proven
+// with a PRIVATE path, so which processing happened is not disclosed.
+export ledger processingRules: MerkleTree<8, Bytes<32>>;
+
+export ledger provenanceTree: HistoricMerkleTree<16, Bytes<32>>;
+
+export ledger nullifiers: Set<Bytes<32>>;
+
+// H("veilance:v2:att", challenge, ownerId, minQuantity) -> policy version.
+export ledger attestations: Map<Bytes<32>, Attestation>;
+
+export ledger partyEncKeys: Map<Bytes<32>, Bytes<32>>;
+
+// Sealed lot pre-images (docs/PROVENANCE_V2.md §5, 332 bytes). Keyed by ordinal, as in v1.
+export ledger lotInbox: Map<Uint<64>, Bytes<332>>;
+
+export ledger lotInboxCount: Counter;
+
+// --------------------------------------------------------------------------
+// Witnesses
+// --------------------------------------------------------------------------
+
+witness adminSecret(): Bytes<32>;
+
+witness ownerSecret(): Bytes<32>;
+
+witness certId(): Bytes<32>;
+
+witness certPath(): MerkleTreePath<8, Bytes<32>>;
+
+// One path per origin slot being proven. For an empty slot the witness returns
+// slot 0's path again, so the disclosed roots do not reveal how many origins a
+// lot has.
+witness originPaths(): Vector<2, MerkleTreePath<8, Bytes<32>>>;
+
+witness heldLot(): Lot;
+
+witness heldPath(): MerkleTreePath<16, Bytes<32>>;
+
+witness secondLot(): Lot;
+
+witness secondPath(): MerkleTreePath<16, Bytes<32>>;
+
+witness issuedMaterial(): IssueSpec;
+
+witness recipientId(): Bytes<32>;
+
+witness outQuantity(): Uint<32>;
+
+witness newCarbonClass(): Uint<8>;
+
+witness newBatchSecret(): Bytes<32>;
+
+witness changeBatchSecret(): Bytes<32>;
+
+witness outMaterial(): Bytes<32>;
+
+witness outCustody(): Uint<8>;
+
+witness outOrigins(): Vector<2, OriginSlot>;
+
+witness ruleYield(): Uint<8>;
+
+witness recyclerIsEu(): Boolean;
+
+witness recyclerPath(): MerkleTreePath<8, Bytes<32>>;
+
+// Recycled share assigned to the lot being sent (transfer) or produced (process).
+witness outRecycledEu(): Uint<32>;
+
+witness outRecycledOther(): Uint<32>;
+
+witness periodAccount(): PeriodAccount;
+
+witness periodPath(): MerkleTreePath<16, Bytes<32>>;
+
+witness declareSalt(): Bytes<32>;
+
+witness rulePath(): MerkleTreePath<8, Bytes<32>>;
+
+// --------------------------------------------------------------------------
+// Pure derivations
+// --------------------------------------------------------------------------
+
+export pure circuit partyIdOf(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "veilance:id"), secret]);
+}
+
+export pure circuit certLeafOf(partyId: Bytes<32>, cid: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "veilance:cert"), partyId, cid]);
+}
+
+export pure circuit commitmentOf(l: Lot): Bytes<32> {
+  return persistentHash<Vector<13, Bytes<32>>>(
+           [pad(32, "veilance:v2:cm"),
+            l.ownerId,
+            l.materialType,
+            (l.quantity as Field) as Bytes<32>,
+            (l.carbonClass as Field) as Bytes<32>,
+            (l.custody as Field) as Bytes<32>,
+            l.origins[0].originId,
+            l.origins[0].issuerId,
+            l.origins[1].originId,
+            l.origins[1].issuerId,
+            (l.recycledEuKg as Field) as Bytes<32>,
+            (l.recycledOtherKg as Field) as Bytes<32>,
+            l.batchSecret]
+           );
+}
+
+export pure circuit accountCommitmentOf(a: PeriodAccount): Bytes<32> {
+  return persistentHash<Vector<9, Bytes<32>>>(
+           [pad(32, "veilance:v2:acct"),
+            a.ownerId,
+            a.plantId,
+            (a.period as Field) as Bytes<32>,
+            a.materialType,
+            (a.totalKg as Field) as Bytes<32>,
+            (a.recycledEuKg as Field) as Bytes<32>,
+            (a.recycledOtherKg as Field) as Bytes<32>,
+            a.secret]
+           );
+}
+
+export pure circuit recyclerLeafOf(partyId: Bytes<32>, cid: Bytes<32>, isEu: Boolean): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>(
+           [pad(32, "veilance:v2:rec"), partyId, cid, ((isEu ? 1 : 0) as Field) as Bytes<32>]
+           );
+}
+
+export pure circuit periodMarkerOf(ownerId: Bytes<32>, plantId: Bytes<32>, period: Uint<32>, materialType: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<5, Bytes<32>>>(
+           [pad(32, "veilance:v2:open"), ownerId, plantId, (period as Field) as Bytes<32>, materialType]
+           );
+}
+
+export pure circuit totalCommitOf(totalKg: Uint<32>, salt: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "veilance:v2:tot"), (totalKg as Field) as Bytes<32>, salt]);
+}
+
+export pure circuit declarationKeyOf(ownerId: Bytes<32>, plantId: Bytes<32>, period: Uint<32>, materialType: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<5, Bytes<32>>>(
+           [pad(32, "veilance:v2:decl"), ownerId, plantId, (period as Field) as Bytes<32>, materialType]
+           );
+}
+
+export pure circuit nullifierOf(commitment: Bytes<32>, secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "veilance:nf"), commitment, secret]);
+}
+
+export pure circuit ruleLeafOf(inMaterial: Bytes<32>, outMaterial: Bytes<32>, yieldPct: Uint<8>): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>(
+           [pad(32, "veilance:v2:rule"), inMaterial, outMaterial, (yieldPct as Field) as Bytes<32>]
+           );
+}
+
+// The order-bound attestation key. minQuantity is inside the hash, so the
+// order size is never disclosed; the OEM recomputes the key from the challenge
+// and quantity it chose. As in v1, the challenge must be >= 128 bits of fresh
+// randomness, otherwise ownerId (and minQuantity) become guessable.
+export pure circuit attestationKeyOf(challenge: Bytes<32>, ownerId: Bytes<32>, minQuantity: Uint<32>): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>(
+           [pad(32, "veilance:v2:att"), challenge, ownerId, (minQuantity as Field) as Bytes<32>]
+           );
+}
+
+// --------------------------------------------------------------------------
+// Constructor
+// --------------------------------------------------------------------------
+
+constructor() {
+  adminId = disclose(partyIdOf(adminSecret()));
+  carbonThreshold = 0;
+}
+
+// --------------------------------------------------------------------------
+// Internal helpers
+// --------------------------------------------------------------------------
+
+circuit assertAdmin(): [] {
+  assert(partyIdOf(adminSecret()) == adminId, "veilance: caller is not the admin");
+}
+
+circuit assertSupplierCertified(partyId: Bytes<32>): [] {
+  const path = certPath();
+  assert(path.leaf == certLeafOf(partyId, certId()),
+         "veilance: cert path does not match the caller's certificate"
+         );
+  assert(certifiedSuppliers.checkRoot(disclose(merkleTreePathRoot<8, Bytes<32>>(path))),
+         "veilance: supplier is not certified"
+         );
+}
+
+// Every non-empty slot's origin must be on the CURRENT allow-list. An empty
+// slot re-proves slot 0, so the transcript is the same for one or two origins.
+circuit assertOriginsCertified(origins: Vector<2, OriginSlot>): [] {
+  const zero = default<Bytes<32>>;
+  assert(origins[0].originId != zero, "veilance: lot has no origin");
+  const paths = originPaths();
+  for (const i of 0..2) {
+    const target = origins[i].originId == zero ? origins[0].originId : origins[i].originId;
+    assert(paths[i].leaf == target, "veilance: origin path does not match the lot origin");
+    assert(certifiedOrigins.checkRoot(disclose(merkleTreePathRoot<8, Bytes<32>>(paths[i]))),
+           "veilance: origin is not certified"
+           );
+  }
+}
+
+// Proves `lot` is owned by the caller and its commitment is in the tree.
+// Nothing here is disclosed except the recomputed (public) root.
+circuit proveOwned(lot: Lot, path: MerkleTreePath<16, Bytes<32>>, secret: Bytes<32>): Bytes<32> {
+  assert(lot.ownerId == partyIdOf(secret), "veilance: caller does not own this lot");
+  const commitment = commitmentOf(lot);
+  assert(path.leaf == commitment, "veilance: merkle path does not match the lot commitment");
+  assert(provenanceTree.checkRoot(disclose(merkleTreePathRoot<16, Bytes<32>>(path))),
+         "veilance: lot is not in the provenance tree"
+         );
+  return commitment;
+}
+
+// Consumes a lot. DISCLOSURE: its nullifier, unlinkable to the commitment
+// without the owner's secret.
+circuit spend(commitment: Bytes<32>, secret: Bytes<32>): Bytes<32> {
+  const nullifier = nullifierOf(commitment, secret);
+  assert(!nullifiers.member(disclose(nullifier)), "veilance: lot already consumed");
+  nullifiers.insert(disclose(nullifier));
+  return nullifier;
+}
+
+// Creates a lot. DISCLOSURE: its commitment (hash over a fresh batchSecret).
+circuit mint(lot: Lot): Bytes<32> {
+  const commitment = commitmentOf(lot);
+  provenanceTree.insert(disclose(commitment));
+  return commitment;
+}
+
+circuit assertRecycledFits(l: Lot): [] {
+  assert((l.recycledEuKg as Uint<64>) + (l.recycledOtherKg as Uint<64>) <= (l.quantity as Uint<64>),
+         "veilance: recycled share exceeds the lot quantity"
+         );
+}
+
+circuit deliver(entry: Bytes<332>): [] {
+  lotInbox.insert(lotInboxCount.read(), disclose(entry));
+  lotInboxCount.increment(1);
+}
+
+// True iff `slot` is empty or equals one of `set`'s slots.
+circuit slotIn(slot: OriginSlot, a: OriginSlot, b: OriginSlot): Boolean {
+  const zero = default<Bytes<32>>;
+  return slot.originId == zero ||
+         (slot.originId == a.originId && slot.issuerId == a.issuerId) ||
+         (slot.originId == b.originId && slot.issuerId == b.issuerId);
+}
+
+// True iff `slot` is empty or appears in either input lot.
+circuit slotFromInputs(slot: OriginSlot, x: Lot, y: Lot): Boolean {
+  return slotIn(slot, x.origins[0], x.origins[1]) || slotIn(slot, y.origins[0], y.origins[1]);
+}
+
+// --------------------------------------------------------------------------
+// Registration and admin
+// --------------------------------------------------------------------------
+
+export circuit registerEncKey(encPk: Bytes<32>): [] {
+  partyEncKeys.insert(disclose(partyIdOf(ownerSecret())), disclose(encPk));
+}
+
+export circuit certifyOrigin(originId: Bytes<32>): [] {
+  assertAdmin();
+  certifiedOrigins.insert(disclose(originId));
+  policyVersion.increment(1);
+}
+
+export circuit certifySupplier(partyId: Bytes<32>, cid: Bytes<32>): [] {
+  assertAdmin();
+  certifiedSuppliers.insert(disclose(certLeafOf(partyId, cid)));
+  policyVersion.increment(1);
+}
+
+export circuit certifyRecycler(partyId: Bytes<32>, cid: Bytes<32>, isEu: Boolean): [] {
+  assertAdmin();
+  certifiedRecyclers.insert(disclose(recyclerLeafOf(partyId, cid, isEu)));
+  policyVersion.increment(1);
+}
+
+export circuit setCarbonThreshold(t: Uint<8>): [] {
+  assertAdmin();
+  carbonThreshold = disclose(t);
+  policyVersion.increment(1);
+}
+
+// DISCLOSURE: the rule's leaf hash. The rule itself is admin policy; which
+// rule a later processLots used stays private (private Merkle path).
+export circuit addProcessingRule(inMaterial: Bytes<32>, outMaterial: Bytes<32>, yieldPct: Uint<8>): [] {
+  assertAdmin();
+  assert(yieldPct >= 1 && yieldPct <= 100, "veilance: yield must be 1..100 percent");
+  processingRules.insert(disclose(ruleLeafOf(inMaterial, outMaterial, yieldPct)));
+  policyVersion.increment(1);
+}
+
+// --------------------------------------------------------------------------
+// Issue
+// --------------------------------------------------------------------------
+
+export circuit issueLot(entry: Bytes<332>): Bytes<32> {
+  const issuerId = partyIdOf(ownerSecret());
+  assertSupplierCertified(issuerId);
+
+  const spec = issuedMaterial();
+  const recipient = recipientId();
+  assert(spec.quantity > 0, "veilance: quantity must be positive");
+  assert(spec.custody >= 1 && spec.custody <= 3, "veilance: unknown custody model");
+
+  const zero = default<Bytes<32>>;
+  const lot = Lot { ownerId: recipient,
+                    materialType: spec.materialType,
+                    quantity: spec.quantity,
+                    carbonClass: spec.carbonClass,
+                    custody: spec.custody,
+                    origins: [OriginSlot { originId: spec.originId, issuerId: issuerId },
+                              OriginSlot { originId: zero, issuerId: zero }],
+                    recycledEuKg: 0,
+                    recycledOtherKg: 0,
+                    batchSecret: spec.batchSecret };
+  assertOriginsCertified(lot.origins);
+
+  const commitment = mint(lot);
+  deliver(entry);
+  return disclose(commitment);
+}
+
+// A certified recycler issues recovered material. The whole lot is recycled;
+// whether it counts as EU-recovered comes from the recycler's certificate, not
+// from the caller. The origin slot is the recycling facility.
+export circuit issueRecycledLot(entry: Bytes<332>): Bytes<32> {
+  const issuerId = partyIdOf(ownerSecret());
+  assertSupplierCertified(issuerId);
+  const isEu = recyclerIsEu();
+  const rpath = recyclerPath();
+  assert(rpath.leaf == recyclerLeafOf(issuerId, certId(), isEu),
+         "veilance: recycler path does not match the caller's certificate"
+         );
+  assert(certifiedRecyclers.checkRoot(disclose(merkleTreePathRoot<8, Bytes<32>>(rpath))),
+         "veilance: issuer is not a certified recycler"
+         );
+
+  const spec = issuedMaterial();
+  const recipient = recipientId();
+  assert(spec.quantity > 0, "veilance: quantity must be positive");
+  assert(spec.custody >= 1 && spec.custody <= 3, "veilance: unknown custody model");
+
+  const zero = default<Bytes<32>>;
+  const lot = Lot { ownerId: recipient,
+                    materialType: spec.materialType,
+                    quantity: spec.quantity,
+                    carbonClass: spec.carbonClass,
+                    custody: spec.custody,
+                    origins: [OriginSlot { originId: spec.originId, issuerId: issuerId },
+                              OriginSlot { originId: zero, issuerId: zero }],
+                    recycledEuKg: isEu ? spec.quantity : 0,
+                    recycledOtherKg: isEu ? 0 : spec.quantity,
+                    batchSecret: spec.batchSecret };
+  assertOriginsCertified(lot.origins);
+
+  const commitment = mint(lot);
+  deliver(entry);
+  return disclose(commitment);
+}
+
+// --------------------------------------------------------------------------
+// Transfer / split
+// --------------------------------------------------------------------------
+
+// Sends `outQuantity` of the held lot to the recipient and keeps the rest as
+// a change lot. The change lot is ALWAYS minted (even when empty) so a full
+// and a partial transfer look the same on chain.
+export circuit transferLot(entry: Bytes<332>): [Bytes<32>, Bytes<32>, Bytes<32>] {
+  const secret = ownerSecret();
+  const lot = heldLot();
+  const commitment = proveOwned(lot, heldPath(), secret);
+  assertSupplierCertified(lot.ownerId);
+  assertOriginsCertified(lot.origins);
+  const nullifier = spend(commitment, secret);
+
+  // Bind every witness once (see v1 transferProvenance).
+  const recipient = recipientId();
+  const sent = outQuantity();
+  const newClass = newCarbonClass();
+  const outSecret = newBatchSecret();
+  const changeSecret = changeBatchSecret();
+  const sentEu = outRecycledEu();
+  const sentOther = outRecycledOther();
+
+  assert(sent > 0, "veilance: transfer quantity must be positive");
+  // Mass-balance allocation: the recycled share may be split freely between
+  // the sent lot and the change lot, but never created.
+  assert(sentEu <= lot.recycledEuKg && sentOther <= lot.recycledOtherKg,
+         "veilance: transfer allocates more recycled material than the lot holds"
+         );
+  assert(sent <= lot.quantity, "veilance: transfer exceeds the lot quantity");
+  assert(newClass >= lot.carbonClass, "veilance: carbon class may not decrease across a transfer");
+
+  const out = Lot { ownerId: recipient,
+                    materialType: lot.materialType,
+                    quantity: sent,
+                    carbonClass: newClass,
+                    custody: lot.custody,
+                    origins: lot.origins,
+                    recycledEuKg: sentEu,
+                    recycledOtherKg: sentOther,
+                    batchSecret: outSecret };
+  const change = Lot { ownerId: lot.ownerId,
+                       materialType: lot.materialType,
+                       quantity: (lot.quantity - sent) as Uint<32>,
+                       carbonClass: lot.carbonClass,
+                       custody: lot.custody,
+                       origins: lot.origins,
+                       recycledEuKg: (lot.recycledEuKg - sentEu) as Uint<32>,
+                       recycledOtherKg: (lot.recycledOtherKg - sentOther) as Uint<32>,
+                       batchSecret: changeSecret };
+  assertRecycledFits(out);
+  assertRecycledFits(change);
+
+  const outCommitment = mint(out);
+  const changeCommitment = mint(change);
+  deliver(entry);
+  return [disclose(nullifier), disclose(outCommitment), disclose(changeCommitment)];
+}
+
+// --------------------------------------------------------------------------
+// Merge / process
+// --------------------------------------------------------------------------
+
+// Consumes two held lots of the same material and mints one lot to the caller
+// under a registered processing rule (a same-material merge is the rule
+// in = out, 100 %). Origins of the result must be exactly drawn from the
+// inputs' origins, and every input origin must survive.
+export circuit processLots(): [Bytes<32>, Bytes<32>, Bytes<32>] {
+  const secret = ownerSecret();
+  const a = heldLot();
+  const b = secondLot();
+  const commitmentA = proveOwned(a, heldPath(), secret);
+  const commitmentB = proveOwned(b, secondPath(), secret);
+  assertSupplierCertified(a.ownerId);
+  assert(a.materialType == b.materialType, "veilance: inputs must be the same material");
+  // Spending both also rejects a == b: the second spend sees the first nullifier.
+  const nullifierA = spend(commitmentA, secret);
+  const nullifierB = spend(commitmentB, secret);
+
+  const material = outMaterial();
+  const produced = outQuantity();
+  const newClass = newCarbonClass();
+  const custody = outCustody();
+  const origins = outOrigins();
+  const outSecret = newBatchSecret();
+  const yieldPct = ruleYield();
+  const path = rulePath();
+  const producedEu = outRecycledEu();
+  const producedOther = outRecycledOther();
+
+  // Processing rule, proven privately.
+  assert(path.leaf == ruleLeafOf(a.materialType, material, yieldPct),
+         "veilance: rule path does not match this processing"
+         );
+  assert(processingRules.checkRoot(disclose(merkleTreePathRoot<8, Bytes<32>>(path))),
+         "veilance: no processing rule for these materials"
+         );
+  const total = (a.quantity as Uint<64>) + (b.quantity as Uint<64>);
+  assert(produced > 0, "veilance: output quantity must be positive");
+  assert((produced as Uint<64>) * 100 <= total * (yieldPct as Uint<64>),
+         "veilance: output exceeds the processing yield"
+         );
+
+  // Recycled share of the output is capped at the inputs' recycled RATIO, per
+  // column, so yield losses cannot inflate the recycled percentage.
+  assert((producedEu as Uint<64>) * total <= ((a.recycledEuKg as Uint<64>) + (b.recycledEuKg as Uint<64>)) * (produced as Uint<64>),
+         "veilance: output EU-recycled share exceeds the inputs' ratio"
+         );
+  assert((producedOther as Uint<64>) * total <= ((a.recycledOtherKg as Uint<64>) + (b.recycledOtherKg as Uint<64>)) * (produced as Uint<64>),
+         "veilance: output recycled share exceeds the inputs' ratio"
+         );
+
+  assert(newClass >= a.carbonClass && newClass >= b.carbonClass,
+         "veilance: carbon class may not decrease across processing"
+         );
+  // Two distinct lots merged can no longer be identity-preserved.
+  assert(custody >= 2 && custody <= 3 && custody >= a.custody && custody >= b.custody,
+         "veilance: custody model may only weaken"
+         );
+
+  // origins(out) == origins(a) ∪ origins(b), with at most 2 slots.
+  const zero = default<Bytes<32>>;
+  assert(origins[0].originId != zero, "veilance: result has no origin");
+  assert(origins[1].originId == zero ||
+         origins[1].originId != origins[0].originId ||
+         origins[1].issuerId != origins[0].issuerId,
+         "veilance: duplicate origin slot"
+         );
+  assert(slotFromInputs(origins[0], a, b) && slotFromInputs(origins[1], a, b),
+         "veilance: result origin not present in the inputs"
+         );
+  assert(slotIn(a.origins[0], origins[0], origins[1]) && slotIn(a.origins[1], origins[0], origins[1]) &&
+         slotIn(b.origins[0], origins[0], origins[1]) && slotIn(b.origins[1], origins[0], origins[1]),
+         "veilance: an input origin is missing from the result"
+         );
+  assertOriginsCertified(origins);
+
+  const out = Lot { ownerId: a.ownerId,
+                    materialType: material,
+                    quantity: produced,
+                    carbonClass: newClass,
+                    custody: custody,
+                    origins: origins,
+                    recycledEuKg: producedEu,
+                    recycledOtherKg: producedOther,
+                    batchSecret: outSecret };
+  assertRecycledFits(out);
+  const outCommitment = mint(out);
+  return [disclose(nullifierA), disclose(nullifierB), disclose(outCommitment)];
+}
+
+// --------------------------------------------------------------------------
+// Order-bound attestation
+// --------------------------------------------------------------------------
+
+// Proves, without disclosing any value, that the held lot covers an order of
+// `minQuantity` and meets policy; then rotates the lot (rotate-on-attest, see
+// CONTRACT_DESIGN.md §9) so a consumed lot can never attest and the
+// attestation links to nothing later.
+export circuit attestOrder(challenge: Bytes<32>, minQuantity: Uint<32>): [Bytes<32>, Bytes<32>] {
+  const secret = ownerSecret();
+  const lot = heldLot();
+  const commitment = proveOwned(lot, heldPath(), secret);
+  assertOriginsCertified(lot.origins);
+  assertSupplierCertified(lot.ownerId);
+  assert(lot.carbonClass <= carbonThreshold, "veilance: carbon class exceeds the policy threshold");
+  assert(lot.quantity >= minQuantity, "veilance: lot does not cover the ordered quantity");
+
+  const nullifier = spend(commitment, secret);
+  const rotated = Lot { ownerId: lot.ownerId,
+                        materialType: lot.materialType,
+                        quantity: lot.quantity,
+                        carbonClass: lot.carbonClass,
+                        custody: lot.custody,
+                        origins: lot.origins,
+                        recycledEuKg: lot.recycledEuKg,
+                        recycledOtherKg: lot.recycledOtherKg,
+                        batchSecret: newBatchSecret() };
+  const rotatedCommitment = mint(rotated);
+
+  const key = disclose(attestationKeyOf(challenge, lot.ownerId, minQuantity));
+  assert(!attestations.member(key), "veilance: challenge already used by this holder for this quantity");
+  attestations.insert(key, Attestation { policyVersion: policyVersion.read() });
+  return [disclose(nullifier), disclose(rotatedCommitment)];
+}
+
+// --------------------------------------------------------------------------
+// Plant / period recycled-content declaration (docs/PLATFORM_LAYER.md §3)
+// --------------------------------------------------------------------------
+
+circuit proveAccount(secret: Bytes<32>): [PeriodAccount, Bytes<32>] {
+  const account = periodAccount();
+  assert(account.ownerId == partyIdOf(secret), "veilance: caller does not own this account");
+  const commitment = accountCommitmentOf(account);
+  const path = periodPath();
+  assert(path.leaf == commitment, "veilance: merkle path does not match the account commitment");
+  assert(provenanceTree.checkRoot(disclose(merkleTreePathRoot<16, Bytes<32>>(path))),
+         "veilance: account is not in the provenance tree"
+         );
+  return [account, commitment];
+}
+
+// Opens the single account for (plant, period, material). DISCLOSURE: the
+// marker hash (opaque until the declaration names the same tuple).
+export circuit openPeriod(plantId: Bytes<32>, period: Uint<32>, materialType: Bytes<32>): Bytes<32> {
+  const ownerId = partyIdOf(ownerSecret());
+  assertSupplierCertified(ownerId);
+  const marker = disclose(periodMarkerOf(ownerId, plantId, period, materialType));
+  assert(!periodMarkers.member(marker), "veilance: this plant/period account is already open");
+  periodMarkers.insert(marker);
+  const account = PeriodAccount { ownerId: ownerId,
+                                  plantId: plantId,
+                                  period: period,
+                                  materialType: materialType,
+                                  totalKg: 0,
+                                  recycledEuKg: 0,
+                                  recycledOtherKg: 0,
+                                  secret: newBatchSecret() };
+  const commitment = accountCommitmentOf(account);
+  provenanceTree.insert(disclose(commitment));
+  return disclose(commitment);
+}
+
+// Consumes one held lot into production at the account's plant and period.
+// The lot and the old account are spent; a new account carries the sums.
+export circuit consumeIntoPeriod(): [Bytes<32>, Bytes<32>, Bytes<32>] {
+  const secret = ownerSecret();
+  const lot = heldLot();
+  const lotCommitment = proveOwned(lot, heldPath(), secret);
+  const [account, accountCommitment] = proveAccount(secret);
+  assert(lot.materialType == account.materialType, "veilance: lot material does not match the account");
+  const lotNullifier = spend(lotCommitment, secret);
+  const accountNullifier = spend(accountCommitment, secret);
+
+  const next = PeriodAccount { ownerId: account.ownerId,
+                               plantId: account.plantId,
+                               period: account.period,
+                               materialType: account.materialType,
+                               totalKg: (account.totalKg + lot.quantity) as Uint<32>,
+                               recycledEuKg: (account.recycledEuKg + lot.recycledEuKg) as Uint<32>,
+                               recycledOtherKg: (account.recycledOtherKg + lot.recycledOtherKg) as Uint<32>,
+                               secret: newBatchSecret() };
+  const nextCommitment = accountCommitmentOf(next);
+  provenanceTree.insert(disclose(nextCommitment));
+  return [disclose(lotNullifier), disclose(accountNullifier), disclose(nextCommitment)];
+}
+
+// Closes the account and publishes the declared recycled share, proving
+//   declaredBps <= 10000 * (other + 1.3 * eu) / total
+// without disclosing any of the three quantities.
+export circuit declareShare(plantId: Bytes<32>, period: Uint<32>, materialType: Bytes<32>, declaredBps: Uint<16>): [] {
+  const secret = ownerSecret();
+  const [account, accountCommitment] = proveAccount(secret);
+  assert(account.plantId == plantId && account.period == period && account.materialType == materialType,
+         "veilance: account does not match the declared plant/period/material"
+         );
+  assert(account.totalKg > 0, "veilance: nothing was consumed in this period");
+  assert(declaredBps <= 10000, "veilance: share above 100 percent");
+  // declared * total * 10 <= 10000 * (other * 10 + eu * 13)
+  const lhs = (declaredBps as Uint<64>) * (account.totalKg as Uint<64>) * 10;
+  const rhs = ((account.recycledOtherKg as Uint<64>) * 10 + (account.recycledEuKg as Uint<64>) * 13) * 10000;
+  assert(lhs <= rhs, "veilance: declared share exceeds the recorded recycled content");
+  spend(accountCommitment, secret);
+  const key = disclose(declarationKeyOf(account.ownerId, plantId, period, materialType));
+  assert(!declarations.member(key), "veilance: already declared");
+  // DISCLOSURE: the share (public in the passport anyway) and a hiding
+  // commitment to the total, opened only to the notified body.
+  const totalCommit = disclose(totalCommitOf(account.totalKg, declareSalt()));
+  declarations.insert(key, Declaration { shareBps: disclose(declaredBps), totalCommit: totalCommit });
+}
