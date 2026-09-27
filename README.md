@@ -2,7 +2,7 @@
 
 **A Midnight-based demo for proving supply-chain provenance and policy compliance while protecting transaction details.**
 
-[한국어](README.md) | **English**
+[한국어](README.ko.md) | **English**
 
 Veilance issues and transfers provenance credentials along a mine → refiner → battery manufacturer supply chain. Zero-knowledge proofs demonstrate the conditions a verifier needs to check. Credential contents are encrypted for the recipient, while the contract verifies commitments and policy conditions.
 
