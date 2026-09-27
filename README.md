@@ -1,5 +1,7 @@
 # Veilance
 
+> **Team Project** — Co-built as part of a collaborative project exploring privacy-preserving supply-chain verification on Midnight.
+
 **A Midnight-based demo for proving supply-chain provenance and policy compliance while protecting transaction details.**
 
 [한국어](README.ko.md) | **English**
