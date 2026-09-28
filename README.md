@@ -1,3 +1,7 @@
+> [!NOTE]
+> **Team project · Portfolio context**  
+> Veilance was built collaboratively. I contributed extensively to implementation and integration across the codebase; the repository is presented as a team result, not as individual work.
+
 # Veilance
 
 > **Team Project** — Co-built as part of a collaborative project exploring privacy-preserving supply-chain verification on Midnight.
